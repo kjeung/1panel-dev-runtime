@@ -1,0 +1,24 @@
+# 与 docker-compose.yml 叠加使用（Traefik 容器与 app 在同一 docker 网络）：
+#
+#   docker network create traefik        # 若还没有
+#   docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d --build
+#
+# 作用：
+#   - 不再把 8080 发布到宿主机（容器只在 docker 网络内可达）
+#   - 加入 traefik 网络，Traefik 通过 http://deepseek-harness:8080 回源
+#
+# 需要 Compose >= 2.24（使用 !reset 清空基础文件的 ports）。
+# 旧版本请直接编辑 docker-compose.yml：删除 ports: 段，改用 expose: ["8080"] 并加入 networks。
+
+services:
+  deepseek-harness:
+    ports: !reset []
+    expose:
+      - "8080"
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true
+    name: traefik

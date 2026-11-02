@@ -96,6 +96,88 @@ location / {
 
 > 若启用了 `PROXY_SHARED_SECRET`，再补一行 `proxy_set_header X-DSH-Proxy-Secret "<同一个值>";`。
 
+### 用 Traefik（file provider 动态配置）
+
+仓库已带两份示例，按拓扑二选一：
+
+| 拓扑 | 做法 | 动态配置里的 service URL |
+|---|---|---|
+| **A. Traefik 也是容器（推荐）** | 用 `docker-compose.traefik.yml` 叠加启动，8080 不再发布到宿主机，app 加入 `traefik` 网络 | `http://deepseek-harness:8080` |
+| B. Traefik 用 host 网络/直连宿主机回环 | 保持默认 compose（只发布 `127.0.0.1:8080`） | `http://127.0.0.1:8080` |
+
+> 拓扑 A 需要 **Compose ≥ 2.24**（用到 `!reset` 清除基础文件的 `ports:`）。
+> 旧版本直接编辑 `docker-compose.yml`：删掉 `ports:` 段，改成 `expose: ["8080"]` 并加入 `traefik` 网络。
+
+```bash
+# 拓扑 A
+docker network create traefik 2>/dev/null || true
+docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d --build
+```
+
+把 `traefik/dynamic.yml` 挂进 Traefik（或用你自己的 file provider 目录）：
+
+```yaml
+# Traefik 容器
+volumes:
+  - ./traefik/dynamic.yml:/etc/traefik/dynamic/dsh.yml:ro
+```
+
+Traefik **static** 侧需要 file provider 与长连接超时（按需调整）：
+
+```yaml
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+entryPoints:
+  websecure:
+    address: ":443"
+    transport:
+      respondingTimeouts:
+        readTimeout: 0s          # 允许 300 MiB 大上传
+        writeTimeout: 0s         # 允许长时间流式响应
+        idleTimeout: 180s
+```
+
+然后修改 `traefik/dynamic.yml` 里的三处：`Host(...)` → 你的 `DSH_ACCESS_HOST`、`certResolver` → 你的解析器、
+`dsh-auth` → 你现有的认证中间件（forwardAuth/OIDC/basicAuth 均可）。
+
+Traefik 侧必须注意的点：
+
+| 项 | 设置 |
+|---|---|
+| Router 规则 | `Host(...)` 必须与 `DSH_ACCESS_HOST` **逐字一致** |
+| Host 透传 | `loadBalancer.passHostHeader: true`（默认就是 true，别关） |
+| TLS | 在 router 上 `tls.certResolver`；容器内仍是明文 |
+| 认证 | 认证中间件必须覆盖**所有路径**，包括 WebSocket `/api/remote.mux` |
+| 缓冲 | **不要**加 `buffering` 中间件；也建议不要加 `compress`（SSE/流式会受影响） |
+| 请求体 | Traefik 默认不限制；不要加小的 `maxRequestBodyBytes`（DSH 上限 300 MiB） |
+| 健康检查 | 优先用容器自带 healthcheck。若要启用 Traefik `healthCheck`：路径用 `/healthz` **并且**设置 `PROXY_SHARED_SECRET` 后在 healthCheck 里带 `X-DSH-Proxy-Secret`（`/healthz` 只接受回环来源或带密钥的请求，否则 403 → 后端被摘除） |
+| WebSocket | Traefik 原生支持，无需额外 header；确认中间件没有改写 `Upgrade` |
+| 超时 | 长流式不要给 `responseHeaderTimeout` 设小值（示例配置为 `0s`） |
+
+验证（DNS 指向 Traefik 后）：
+
+```bash
+# 页面（认证中间件会先拦截）
+curl -fsS -o /dev/null -w '%{http_code}
+' https://dsh.example.com/
+
+# WebSocket 升级（带上你认证后的 Cookie；期望 101）
+curl -i -N -H 'Connection: Upgrade' -H 'Upgrade: websocket'   -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=='   -b "$AUTH_COOKIE" https://dsh.example.com/api/remote.mux | head -3
+```
+
+Traefik 排障要点：
+
+| 现象 | 原因 |
+|---|---|
+| 404 | Router 未匹配：`Host` 规则与访问域名不一致、entryPoint 不对，或动态配置未加载（看 Traefik dashboard/日志） |
+| 502 | Service URL 错或网络不通：拓扑 A 的 app 不在 `traefik` 网络，或拓扑 B 未发布 `127.0.0.1:8080` |
+| 403 `forbidden` | `passHostHeader: false`，或反代改写了 Host/端口 |
+| 401/302 登录页反复出现 | 认证中间件没覆盖 WebSocket 路径，或会话 Cookie 没透传 |
+| 流式卡住/一次性出现 | 加了 `buffering`/`compress` 中间件，或超时过小 |
+| 后端被标 unhealthy | Traefik healthCheck 打了 `/healthz` 但没带 `X-DSH-Proxy-Secret` |
+
 ## 3. 环境变量
 
 ### 3.1 必填（1 个）
