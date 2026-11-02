@@ -68,6 +68,15 @@ DeepSeek Harness is available at http://dsh.example.com:8080 inside the containe
 This container performs no TLS and no authentication: restrict port 8080 to the trusted reverse proxy.
 ```
 
+构建完成后先做一次宿主机冒烟（`Host` 换成你的 `DSH_ACCESS_HOST`）：
+
+```bash
+curl -fsS -o /dev/null -w '%{http_code}\n' \
+  -H 'Host: dsh.example.com' http://127.0.0.1:8080/     # 期望 200
+docker compose exec -T deepseek-harness \
+  curl -fsS http://127.0.0.1:8080/healthz               # {"ok":true,"backend":200}
+```
+
 然后在外部反代里加一条站点，回源 `http://127.0.0.1:8080`：
 
 ```nginx
@@ -170,11 +179,21 @@ docker compose up -d
 docker compose ps                 # (healthy) 才算就绪
 docker compose logs -f            # 入口脚本 + dsh + 转发进程（JSON 访问日志）
 docker compose exec deepseek-harness dsh --version
-curl -fsS http://127.0.0.1:8080/healthz   # {"ok":true,"backend":200}
+
+# 容器内健康检查（等价于 compose healthcheck；/healthz 只接受回环来源）
+docker compose exec -T deepseek-harness \
+  curl -fsS http://127.0.0.1:8080/healthz        # {"ok":true,"backend":200}
+
+# 宿主机冒烟：经发布端口访问（Host 必须是 DSH_ACCESS_HOST）
+curl -fsS -o /dev/null -w '%{http_code}\n' \
+  -H 'Host: dsh.example.com' http://127.0.0.1:8080/   # 200
 ```
 
-- **健康检查**：容器内 `curl http://127.0.0.1:8080/healthz`，它同时探测转发进程与后端 dsh。
-  该端点只接受**来自回环**的请求（或带 `X-DSH-Proxy-Secret` 的请求），外部扫描拿不到后端状态。
+- **健康检查**：`/healthz` 同时探测转发进程与后端 dsh，但**只接受来自回环的请求**
+  （或带 `X-DSH-Proxy-Secret` 的请求），外部扫描拿不到后端状态。
+  因此：在容器内 `curl 127.0.0.1:8080/healthz` 可用；**从宿主机经发布端口访问会得到 403**
+  （Docker DNAT 后来源不是回环），请改用上面的 `Host` 冒烟命令，或带 secret：
+  `curl -H "X-DSH-Proxy-Secret: $PROXY_SHARED_SECRET" http://127.0.0.1:8080/healthz`。
   入口脚本先等 dsh 就绪（最多 60 s）再起转发，所以 compose 把 `start_period` 放宽到 180 s。
 - **进程模型**：`tini` 是 PID 1，dsh 与转发进程任一退出整个容器即退出 → `restart: unless-stopped` 必需。
 - **优雅退出**：SIGTERM → 转发进程立即停止接收新连接并断开 WebSocket，随后最多等 5 s 让普通响应/流收尾，然后退出 0；
@@ -193,6 +212,7 @@ curl -fsS http://127.0.0.1:8080/healthz   # {"ok":true,"backend":200}
 |---|---|
 | 页面白屏、`/api` 403 `forbidden` | `DSH_ACCESS_HOST` 与浏览器地址不一致（含端口差异）；或外部反代改写了 Host（用了 `$host` 丢端口）。 |
 | `401 unauthorized`、容器起不来、日志 `did not become ready` | 镜像补丁丢失或被去掉（`ONEPANEL_DSH_AUTH_PROXY`/`isAuthenticated` 补丁）。必须保留。 |
+| 宿主机 `curl http://127.0.0.1:8080/healthz` 返回 403 | 这是设计行为：`/healthz` 只允许回环来源，经 Docker 端口映射后来源不是回环。在容器内执行，或带 `X-DSH-Proxy-Secret`，或改用 `Host` 冒烟。 |
 | 502 | 后端 dsh 未起/已崩；转发进程会在日志里记 502。 |
 | UI 能打开但永远不刷新、任务无输出 | 外部反代没有转发 WebSocket 升级（缺 `Upgrade`/`Connection` 头）。 |
 | 镜像构建失败：`unexpected browser proxy authentication source shape` / `unexpected PDF worker source shape` | dsh 版本变了，构建期补丁的精确字符串不再匹配。按 [SYNC-UPSTREAM.md §5](SYNC-UPSTREAM.md#5-dsh-版本升级最需要注意的一步) 更新 `patch-dsh-authenticated-settings.mjs`，再跑端到端验证。 |
