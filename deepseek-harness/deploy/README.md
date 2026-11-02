@@ -57,6 +57,8 @@ docker compose logs -f
 - 只想用已构建镜像：设置 `DSH_IMAGE=…`，并删掉 compose 里的 `build:` 与 `pull_policy:` 段。
 - 想在上游原版上复现改造：`patches/image-source.diff` 是相对上游的镜像源码改动
   （基线见 `patches/BASE`），用法见 [patches/README.md](patches/README.md)。
+- 本地覆盖文件已在 `.gitignore` 里忽略：`.env`、`*.local.yml`、`compose.local.yml`、
+  `docker-compose.local.yml`、`docker-compose.override.yml`、`data/`、`workspace/`、`.run/`。
 
 上游更新后如何同步见 [SYNC-UPSTREAM.md](SYNC-UPSTREAM.md)：仓库自带每日自动 PR，
 也可以本地 `scripts/sync-upstream.sh` 手动 rebase（需要完整历史；浅克隆请先 `git fetch --unshallow`）。

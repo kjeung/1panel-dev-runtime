@@ -1,4 +1,24 @@
+# 本地私有配置：绝不提交
 .env
+.env.local
+.env.*.local
+
+# Compose 本地覆盖文件（Compose 会自动加载 docker-compose.override.yml）
+compose.local.yml
+compose.local.yaml
+docker-compose.local.yml
+docker-compose.local.yaml
+docker-compose.override.yml
+compose.override.yml
+
+# 其它本地覆盖（含 traefik/dynamic.local.yml 等）
+*.local.yml
+*.local.yaml
+
+# 运行期数据（bind mount；入口脚本会 chown 这些目录）
 data/
 workspace/
 .run/
+
+# 模板必须入库
+!.env.example
