@@ -234,7 +234,8 @@ Traefik 排障要点：
 
 ### 3.6 镜像内置 GitHub CLI（gh）
 
-镜像内置官方 `gh`（Dockerfile 构建参数 `GH_VERSION`，默认 `2.103.3`；从 GitHub Release 下载并按架构校验 SHA256），
+镜像内置官方 `gh`：构建时从 GitHub 官方 apt 源安装**最新稳定版**，不固定小版本，平时不需要手动更新。
+同一份 Dockerfile 在不同时间重建可能得到不同的 `gh`；需要可复现构建时请自行锁版本。
 可直接在容器或 Agent shell 里执行 `gh --version`、`gh auth status`。已有部署要重新
 `docker compose build && docker compose up -d`（或拉取包含它的新镜像）才会带上它；只 `up -d` 不会更新镜像。
 
