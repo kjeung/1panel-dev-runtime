@@ -1,6 +1,11 @@
-name: Build DeepSeek Harness Image
-run-name: Build DeepSeek Harness Image ${{ github.event.inputs.dshVersion }}
+name: Build DeepSeek Harness Image (plain HTTP)
+run-name: Build DeepSeek Harness Image ${{ inputs.dshVersion }}
 
+# This image terminates no TLS and performs no authentication: it must run behind
+# an authenticated TLS reverse proxy, listening on plain-HTTP 8080. It is therefore
+# published under its OWN repository name and alias, never as
+# 1panel/deepseek-harness:<version> or :latest — that would silently replace the
+# Caddy/HTTPS image with a different security model.
 on:
   workflow_dispatch:
     inputs:
@@ -12,14 +17,17 @@ on:
         description: "Platforms"
         default: "linux/amd64,linux/arm64"
         required: true
-      pushLatest:
-        description: "Push latest tag"
+      imageName:
+        description: "Target image repository (plain-HTTP variant, not the Caddy image)"
+        default: "1panel/deepseek-harness-plain"
+        required: true
+      pushAlias:
+        description: "Also tag the alias ':plain' (in addition to ':<dshVersion>')"
         default: "true"
         required: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  IMAGE_NAME: 1panel/deepseek-harness
 
 jobs:
   docker:
@@ -41,30 +49,25 @@ jobs:
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           file: deepseek-harness/Dockerfile
-          platforms: ${{ github.event.inputs.platforms }}
+          platforms: ${{ inputs.platforms }}
           push: true
           build-args: |
-            DSH_VERSION=${{ github.event.inputs.dshVersion }}
+            DSH_VERSION=${{ inputs.dshVersion }}
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.event.inputs.dshVersion }}
+            ${{ inputs.imageName }}:${{ inputs.dshVersion }}
           cache-from: type=gha,scope=deepseek-harness
           cache-to: type=gha,mode=max,scope=deepseek-harness
 
-      - name: Push latest tag
-        if: ${{ github.event.inputs.pushLatest == 'true' }}
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: deepseek-harness/Dockerfile
-          platforms: ${{ github.event.inputs.platforms }}
-          push: true
-          build-args: |
-            DSH_VERSION=${{ github.event.inputs.dshVersion }}
-          tags: |
-            ${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha,scope=deepseek-harness
-          cache-to: type=gha,mode=max,scope=deepseek-harness
+      # Alias the immutable version tag instead of running a second build, so both
+      # tags always resolve to the same multi-arch digest.
+      - name: Push plain alias
+        if: ${{ inputs.pushAlias == 'true' }}
+        run: |
+          docker buildx imagetools create \
+            --tag "${{ inputs.imageName }}:plain" \
+            "${{ inputs.imageName }}:${{ inputs.dshVersion }}"

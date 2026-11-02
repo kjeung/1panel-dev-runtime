@@ -23,7 +23,8 @@ function replaceOnce(source, original, replacement, label) {
 }
 
 // DSH 0.2.1 persists settings through remote.settings for authenticated clients.
-// Only adapt browser authentication for the loopback backend protected by Caddy.
+// Only adapt browser authentication for the loopback backend protected by the
+// container's plain-HTTP forwarding proxy.
 const connectionPath = join(
   await packageRoot('@deepseek-ai/dsh-client-connection'),
   'lib/index.js',
