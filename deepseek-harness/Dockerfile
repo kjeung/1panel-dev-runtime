@@ -10,10 +10,12 @@ RUN apt-get update && \
     npm install --global "@deepseek-ai/dsh@${DSH_VERSION}"
 
 COPY deepseek-harness/patch-dsh-authenticated-settings.mjs /tmp/patch-dsh-authenticated-settings.mjs
+COPY deepseek-harness/patch-dsh-manifest-sse.mjs /tmp/patch-dsh-manifest-sse.mjs
 
 RUN npm install --prefix /tmp/dsh-browser-compat --no-audit --no-fund \
       core-js@3.51.0 esbuild@0.28.2 && \
-    node /tmp/patch-dsh-authenticated-settings.mjs
+    node /tmp/patch-dsh-authenticated-settings.mjs && \
+    node /tmp/patch-dsh-manifest-sse.mjs
 
 FROM node:24-bookworm-slim
 

@@ -337,12 +337,21 @@ const server = http.createServer((request, response) => {
     const timedOut = error.message === 'upstream response timeout'
     // Keep the detail in the container log; the client only sees a generic status.
     if (!clientGone) process.stderr.write(`dsh-node-proxy: upstream error: ${error.message}\n`)
+    // The client walked away before the backend answered (page reload, aborted
+    // fetch, closed tab). Destroying the upstream makes it emit an error too, but
+    // that error is a consequence of the cancellation: reporting 502 would blame
+    // the backend for a request nobody is waiting for. nginx calls this 499.
+    if (clientGone) {
+      response.destroy()
+      log(499, 0)
+      return
+    }
     if (!response.headersSent) {
       reject(response, timedOut ? 504 : 502, timedOut ? 'gateway timeout' : 'bad gateway')
       log(timedOut ? 504 : 502, 0)
     } else {
       response.destroy()
-      log(clientGone ? 499 : timedOut ? 504 : 502, 0)
+      log(timedOut ? 504 : 502, 0)
     }
   })
   // Client aborted mid-request (including mid-upload): stop the upstream.

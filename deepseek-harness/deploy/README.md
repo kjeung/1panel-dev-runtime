@@ -417,10 +417,10 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 - **优雅退出**：SIGTERM → 转发进程立即停止接收新连接并断开 WebSocket，随后最多等 5 s 让普通响应/流收尾，然后退出 0；
   `stop_grace_period: 30s` 足够。长时间运行的 Agent 任务会被中断（与旧镜像一致，重启前请确认没有关键任务）。
 - **升级（含 dsh 版本升级，务必看风险）**：只改小版本（同一 dsh）时 `docker compose build && docker compose up -d` 即可，升级前备份。
-  升级 **dsh 版本**不是改个数字：镜像构建期补丁用精确字符串匹配 `isAuthenticated()`，DSH 源码一变构建就会失败；
+  升级 **dsh 版本**不是改个数字：镜像构建期补丁用精确字符串匹配 DSH 的 `isAuthenticated()`、Web index 的 manifest link 与 HMR SSE 的 close handler，DSH 源码一变构建就会失败；
   DSH 的 WebSocket 路径、`/api` 栅栏、gzip、300 MiB 上限也可能变化。完整清单见
   [SYNC-UPSTREAM.md §5](SYNC-UPSTREAM.md#5-dsh-版本升级最需要注意的一步)，要点：
-  1. 同步上游并重新应用/修正 `patch-dsh-authenticated-settings.mjs` 的匹配字符串；
+  1. 同步上游并重新应用/修正 `patch-dsh-authenticated-settings.mjs` 与 `patch-dsh-manifest-sse.mjs` 的匹配字符串；
   2. 三处版本号保持一致：`docker-compose.yml` 的 `DSH_VERSION`、`.env.example`、`.github/workflows/deepseek-harness-release.yml` 默认值；
   3. 构建后跑端到端（`/healthz`、settings、WebSocket、SSE），再发布。
 
@@ -432,13 +432,14 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 | `401 unauthorized`、容器起不来、日志 `did not become ready` | 镜像补丁丢失或被去掉（`ONEPANEL_DSH_AUTH_PROXY`/`isAuthenticated` 补丁）。必须保留。 |
 | 点“登录 DeepSeek 账号”后标签页关闭、提示“登录失败” | 官方账号登录只支持 loopback HTTP（`localhost`/`127.0.0.1`/`[::1]` + 显式端口），当前是域名或局域网 IP 访问，Host 在发起登录前就拒绝。改用 API Key；必须用账号时按 3.7 的手动回传回调临时登录。 |
 | 宿主机 `curl http://127.0.0.1:8080/healthz` 返回 403 | 这是设计行为：`/healthz` 只允许回环来源，经 Docker 端口映射后来源不是回环。在容器内执行，或带 `X-DSH-Proxy-Secret`，或改用 `Host` 冒烟。 |
-| 502 | 后端 dsh 未起/已崩；转发进程会在日志里记 502。 |
+| 502 | 两种来源：① 后端 dsh 未起/连接失败——容器 stderr 有 `upstream error`；② 客户端在响应前取消（刷新页面、关闭标签、`fetch` abort）——旧版代理会误记 502，现改为 499 且不写 stderr。只有同时看到 stderr 的 `upstream error` 才是真故障。 |
+| `499` 且约每 120–125 s 一次（`/plugins/events`） | 外部反代把空闲 SSE 当读超时切断。把该站点的 `proxy_read_timeout` 提到 3600s、`proxy_buffering off`；若前面还有 Cloudflare/LB，需允许 SSE 并依赖应用心跳。 |
 | UI 能打开但永远不刷新、任务无输出 | 外部反代没有转发 WebSocket 升级（缺 `Upgrade`/`Connection` 头）。 |
-| 镜像构建失败：`unexpected browser proxy authentication source shape` / `unexpected PDF worker source shape` | dsh 版本变了，构建期补丁的精确字符串不再匹配。按 [SYNC-UPSTREAM.md §5](SYNC-UPSTREAM.md#5-dsh-版本升级最需要注意的一步) 更新 `patch-dsh-authenticated-settings.mjs`，再跑端到端验证。 |
+| 镜像构建失败：`unexpected browser proxy authentication source shape` / `unexpected PDF worker source shape` / `unexpected web manifest link source shape` / `unexpected HMR SSE close handler source shape` | dsh 版本变了，构建期补丁的精确字符串不再匹配。按 [SYNC-UPSTREAM.md §5](SYNC-UPSTREAM.md#5-dsh-版本升级最需要注意的一步) 更新 `patch-dsh-authenticated-settings.mjs` / `patch-dsh-manifest-sse.mjs`，再跑端到端验证。 |
 | 流式输出变成一次性出现 | 外部反代或中间层缓冲了响应（`proxy_buffering off`、别加 gzip 中间件）。 |
 | 上传文件 413 | 外部反代 `client_max_body_size` 太小（需 ≥300 MiB）。 |
 | 请求返回 400 `Host must not end with a dot` | 上游反代发来了 FQDN 尾点 Host（`dsh.example.com.`）。DSH 会 403 这种 Host，所以这里提前 400；请让反代用 `$http_host`（不带结尾点）。 |
-| 偶发 502（空闲后首次请求） | 多层 keep-alive 都可能：外部反代↔容器，或容器内转发进程↔dsh。转发进程已把上游连接池空闲超时设成 4 s（低于 dsh 的 ~5 s）以避免复用被后端关掉的连接；若仍出现，先看访问日志的 `status`/`ms` 定位是哪一跳。 |
+| 偶发 502（空闲后首次请求） | 先排除客户端取消（见上表 502 行：`ms` 与取消时刻吻合、`bytes=0`、无 stderr）。若确属空闲复用，多层 keep-alive 都可能：外部反代↔容器，或容器内转发进程↔dsh。转发进程已把上游连接池空闲超时设成 4 s（低于 dsh 的 ~5 s）以避免复用被后端关掉的连接；若仍出现，先看访问日志的 `status`/`ms` 定位是哪一跳。 |
 | 端口被占用 | 改 `DSH_HTTP_PORT`。 |
 | 数据目录在 NFS/SMB 上启动失败 | 入口脚本要 chown/改权限，此类文件系统不支持；改用本地盘或 named volume。 |
 | Agent 报沙箱不可用 | 容器内 bwrap 需要非特权 user namespace；DSH 会回退 landlock，两者都不可用时受限命令失败。仅在自建环境考虑 `seccomp=unconfined`，需自行验证。 |

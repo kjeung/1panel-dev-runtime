@@ -76,8 +76,9 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
 |---|---|---|
 | `deepseek-harness/Dockerfile` | 上游改 Caddy 阶段/版本、包列表 | **删除**上游新增的 Caddy 相关行；保留本分支的 node-proxy COPY、8080、`/healthz` |
 | `deepseek-harness/docker-entrypoint.sh` | 上游改认证/证书逻辑 | 保留本分支：无用户名密码、无 CA、启动 node-proxy；保留 uid/gid、就绪等待、`--trusted-host`、`ONEPANEL_DSH_AUTH_PROXY` |
-| `deepseek-harness/test-runtime.mjs` | 上游改 Caddy 测试 | 保留 PDF 用例 + 本分支 14 个代理用例 |
+| `deepseek-harness/test-runtime.mjs` | 上游改 Caddy 测试 | 保留 PDF 用例 + 本分支代理用例 |
 | `deepseek-harness/patch-dsh-authenticated-settings.mjs` | 上游/DSH 改补丁字符串 | 见第 5 节 |
+| `deepseek-harness/patch-dsh-manifest-sse.mjs` | 上游/DSH 改 Web index 或 HMR SSE | 见第 5 节 |
 | `.github/workflows/deepseek-harness-release.yml` | 上游改 tag/输入 | 保留：独立镜像仓库名、`:<dshVersion>` + `:plain` 别名、context |
 | `deepseek-harness/deploy/**` | 上游没有这个目录 | 一般不会冲突 |
 
@@ -87,9 +88,10 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
 
 上游 workflow 的 `dshVersion` 默认值变化时，脚本与同步 workflow 都会打印警告。升级前：
 
-1. **补丁可能失效**：`patch-dsh-authenticated-settings.mjs` 用精确字符串匹配修改 `isAuthenticated()`，
-   DSH 源码形状一变，镜像构建期（`Dockerfile` 里执行该脚本）会直接失败——这是 fail-fast。
-   需要在 `deepseek-harness/` 里更新匹配字符串。
+1. **补丁可能失效**：`patch-dsh-authenticated-settings.mjs` 用精确字符串匹配修改 `isAuthenticated()` 和 PDF worker，
+   `patch-dsh-manifest-sse.mjs` 用精确字符串匹配修改 Web index 的 manifest link 与 HMR SSE 的 close handler；
+   DSH 源码形状一变，镜像构建期（`Dockerfile` 里执行这两个脚本）会直接失败——这是 fail-fast。
+   需要在 `deepseek-harness/` 里更新对应匹配字符串。
 2. **行为可能变化**：DSH 的 WebSocket 路径、`/api` 栅栏、gzip、300 MiB 上限都依赖 DSH 实现，
    升级后必须重跑端到端（见下）再发布。
 3. 更新默认版本：`deepseek-harness/deploy/docker-compose.yml` 的 `DSH_VERSION`、`deploy/.env.example`、

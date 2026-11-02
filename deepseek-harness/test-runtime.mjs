@@ -140,6 +140,7 @@ async function startProxy(backendPort, env = {}) {
   return {
     port,
     child,
+    output: () => output,
     stop: async () => {
       if (child.exitCode !== null) return
       const exited = once(child, 'exit')
@@ -259,6 +260,47 @@ test('proxy streams responses without buffering', { timeout: 30000 }, async (t) 
   assert.equal(body, 'first\nsecond\n')
   // A buffering proxy would hold "first" until the backend ended 800 ms later.
   assert.ok(firstChunkAt - startedAt < 600, `first chunk arrived after ${firstChunkAt - startedAt} ms`)
+})
+
+test('proxy logs a client abort before the response as 499, not 502', { timeout: 30000 }, async (t) => {
+  const backend = await startBackend((_request, response) => {
+    setTimeout(() => {
+      if (response.destroyed || response.writableEnded) return
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('late')
+    }, 500)
+  })
+  const proxy = await startProxy(backend.port, { PROXY_ACCESS_LOG: '1' })
+  t.after(async () => { await proxy.stop(); await backend.close() })
+
+  await new Promise((resolve) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: proxy.port,
+        method: 'POST',
+        path: '/api/dsws',
+        headers: { Host: ALLOWED_HOST, 'content-type': 'application/json' },
+        agent: false,
+      },
+      () => resolve('response'),
+    )
+    req.on('error', () => resolve('error'))
+    req.end('{}')
+    setTimeout(() => {
+      req.destroy()
+      resolve('aborted')
+    }, 100)
+  })
+
+  let line
+  for (let attempt = 0; attempt < 100; attempt++) {
+    line = proxy.output().split('\n').filter((entry) => entry.includes('"path":"/api/dsws"')).at(-1)
+    if (line !== undefined) break
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  assert.ok(line, `proxy wrote no access log for the aborted request: ${proxy.output()}`)
+  assert.equal(JSON.parse(line).status, 499, `client abort was logged as ${JSON.parse(line).status}`)
 })
 
 test('proxy forwards WebSocket upgrades and fences the Host', { timeout: 30000 }, async (t) => {
