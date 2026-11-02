@@ -4,3 +4,5 @@
 .github
 .gitignore
 **/.DS_Store
+
+deepseek-harness/deploy

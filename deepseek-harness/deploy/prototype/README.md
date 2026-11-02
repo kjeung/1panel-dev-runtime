@@ -3,7 +3,7 @@
 这是为《可行性报告：去认证 + 去 TLS，用 Node 反代替换 Caddy》配套的**实测用**小工具，
 用来证明"Node 代理能否替代 Caddy"。
 
-> **生产版已经落地**：`../../deepseek-harness/node-proxy.mjs`。它在本目录原型的基础上补齐了
+> **生产版已经落地**：`../../node-proxy.mjs`。它在本目录原型的基础上补齐了
 > Host 白名单、安全响应头、JSON 访问日志、`/healthz`、可选共享密钥、优雅退出与错误处理，
 > 并改由 entrypoint 以 node 用户启动。本目录仅保留作为可行性验证的历史证据，**不要用于生产**。
 
@@ -26,7 +26,7 @@ DSH_HOME=$PWD/.run/dsh HOME=$PWD/.run/dsh/home ONEPANEL_DSH_AUTH_PROXY=1 \
   --trusted-host 127.0.0.1:4555 example.test
 
 # 2) 起代理（明文、无认证）
-LISTEN_PORT=8080 BACKEND_PORT=4555 node deploy/prototype/node-proxy.mjs
+LISTEN_PORT=8080 BACKEND_PORT=4555 node deepseek-harness/deploy/prototype/node-proxy.mjs
 
 # 3) settings 端点（Host+Origin 原样透传，不需要 Caddy 的 Host 改写）
 curl -sS -X POST -H 'Content-Type: application/json' \

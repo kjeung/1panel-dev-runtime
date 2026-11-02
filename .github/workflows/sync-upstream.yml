@@ -7,7 +7,7 @@ name: Sync upstream dev
 #
 # A separate PR file could not be used with a rebase: a rebased branch has no
 # ancestor relationship with its base, and merging it would duplicate commits.
-# If you prefer linear history, run scripts/sync-upstream.sh locally instead
+# If you prefer linear history, run deepseek-harness/deploy/scripts/sync-upstream.sh locally instead
 # (it rebases and force-pushes) — a later rebase also drops these merge commits.
 on:
   schedule:
@@ -102,7 +102,7 @@ jobs:
           dockerfile_dsh="$(sed -n 's/^ARG DSH_VERSION=//p' deepseek-harness/Dockerfile | head -1)"
           echo "release workflow dsh=${workflow_dsh:-unknown} Dockerfile ARG=${dockerfile_dsh:-unknown}"
           if [ -n "$dockerfile_dsh" ] && [ "$workflow_dsh" != "$dockerfile_dsh" ]; then
-            echo "::warning::dsh version drift: workflow=$workflow_dsh Dockerfile=$dockerfile_dsh — align them and the deployment compose/.env, see SYNC-UPSTREAM.md §5"
+            echo "::warning::dsh version drift: workflow=$workflow_dsh Dockerfile=$dockerfile_dsh — align them and deploy/docker-compose.yml + deploy/.env, see deepseek-harness/deploy/SYNC-UPSTREAM.md §5"
           fi
 
       - name: Push review branch and open PR
@@ -130,7 +130,7 @@ jobs:
             echo
             echo "### After merging"
             echo
-            echo "1. Refresh the deployment snapshot: \`scripts/sync-upstream.sh --repo <dsh-plain clone> --push\`"
+            echo "1. No deployment snapshot to refresh: deploy/ is in this branch. Rebuild with `cd deepseek-harness/deploy && docker compose build && docker compose up -d`"
             echo "2. Re-check dsh version drift and the auth-bypass patch (see SYNC-UPSTREAM.md §5)"
             echo "3. Build/run the image and smoke-test \`/healthz\`, settings, WebSocket"
           } > "$RUNNER_TEMP/pr-body.md"
@@ -153,7 +153,7 @@ jobs:
             echo '```bash'
             echo "cd runtime && git fetch upstream dev && git switch plain-http"
             echo "git merge upstream/dev     # resolve conflicts"
-            echo "scripts/sync-upstream.sh --repo ../dsh-plain --push   # or just commit + push"
+            echo "deepseek-harness/deploy/scripts/sync-upstream.sh --push   # or just commit + push"
             echo '```'
             echo
             echo "Conflicts are expected in: \`Dockerfile\`, \`docker-entrypoint.sh\`, \`test-runtime.mjs\`, "

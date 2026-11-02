@@ -1,6 +1,6 @@
 # 改造补丁（相对上游 `1Panel-dev/runtime`）
 
-本仓库就是改造后的源码（`deepseek-harness/` + `deploy/`），**日常部署不需要打补丁**。
+本仓库就是改造后的源码（`deepseek-harness/`，部署文件在同级的 `deepseek-harness/deploy/`），**日常部署不需要打补丁**。
 这里的文件用于审计与复现：在干净的上游 checkout 上重现我们的镜像源码改动。
 
 | 文件 | 说明 |
@@ -15,8 +15,8 @@
 git clone --branch dev --filter=blob:none --sparse \
   https://github.com/1Panel-dev/runtime.git runtime
 git -C runtime sparse-checkout set deepseek-harness
-git -C runtime checkout "$(cat deploy/patches/BASE)"
-git -C runtime apply "$OLDPWD/deploy/patches/image-source.diff"
+git -C runtime checkout "$(cat deepseek-harness/deploy/patches/BASE)"
+git -C runtime apply "$OLDPWD/deepseek-harness/deploy/patches/image-source.diff"
 ```
 
 ## 用 bundle 取整支分支
@@ -25,15 +25,15 @@ git -C runtime apply "$OLDPWD/deploy/patches/image-source.diff"
 git clone --branch dev --filter=blob:none --sparse \
   https://github.com/1Panel-dev/runtime.git runtime
 git -C runtime sparse-checkout set deepseek-harness
-git -C runtime checkout "$(cat deploy/patches/BASE)"
-git -C runtime fetch "$OLDPWD/deploy/patches/plain-http.bundle" plain-http:plain-http
+git -C runtime checkout "$(cat deepseek-harness/deploy/patches/BASE)"
+git -C runtime fetch "$OLDPWD/deepseek-harness/deploy/patches/plain-http.bundle" plain-http:plain-http
 git -C runtime checkout plain-http
 ```
 
 ## 重新生成
 
 ```bash
-deploy/scripts/sync-upstream.sh          # 同步上游后自动重新导出
+deepseek-harness/deploy/scripts/sync-upstream.sh          # 同步上游后自动重新导出
 ```
 
 ## 上游更新

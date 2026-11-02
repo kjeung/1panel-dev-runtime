@@ -2,17 +2,17 @@
 # Sync the plain-HTTP fork (this repository) with upstream 1Panel-dev/runtime.
 #
 #   upstream/dev ──rebase──▶ plain-http
-#                              ├── deepseek-harness/  (image source)
-#                              └── deploy/patches/    (exported diff for reproduction)
+#                              ├── deepseek-harness/          (image source)
+#                              └── deepseek-harness/deploy/   (compose, docs, exported diff)
 #
-# Usage:
-#   deploy/scripts/sync-upstream.sh              # fetch + rebase + tests + export patches
-#   deploy/scripts/sync-upstream.sh --push       # also force-with-lease push plain-http
-#   deploy/scripts/sync-upstream.sh --skip-tests
+# Usage (from the repository root):
+#   deepseek-harness/deploy/scripts/sync-upstream.sh              # fetch + rebase + tests + export
+#   deepseek-harness/deploy/scripts/sync-upstream.sh --push       # also force-with-lease push
+#   deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
 set -Eeuo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PATCHES="$ROOT/deploy/patches"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+PATCHES="$ROOT/deepseek-harness/deploy/patches"
 PUSH=0
 TESTS=1
 
@@ -58,8 +58,8 @@ rebase 冲突，请手动解决后重新运行本脚本：
   2) 解决冲突（改动集中在 deepseek-harness/ 与 .github/workflows/）
      注意：Caddyfile 在本分支已删除；上游若修改它，确认删除仍然成立。
   3) git add <files> && git rebase --continue
-  4) 重新执行 deploy/scripts/sync-upstream.sh
-  更完整的原则见 deploy/SYNC-UPSTREAM.md §4
+  4) 重新执行 deepseek-harness/deploy/scripts/sync-upstream.sh
+  更完整的原则见 deepseek-harness/deploy/SYNC-UPSTREAM.md §4
 EOF
     exit 1
   fi
@@ -68,13 +68,13 @@ fi
 WF="$ROOT/.github/workflows/deepseek-harness-release.yml"
 WORKFLOW_DSH="$(grep -m1 'default: "' "$WF" | sed 's/.*default: "//; s/".*//')"
 DOCKERFILE_DSH="$(sed -n 's/^ARG DSH_VERSION=//p' "$ROOT/deepseek-harness/Dockerfile" | head -1)"
-COMPOSE_DSH="$(sed -n 's/.*DSH_VERSION:-\{0,1\}\([0-9][^} ]*\).*/\1/p' "$ROOT/deploy/docker-compose.yml" | head -1)"
+COMPOSE_DSH="$(sed -n 's/.*DSH_VERSION:-\{0,1\}\([0-9][^} ]*\).*/\1/p' "$ROOT/deepseek-harness/deploy/docker-compose.yml" | head -1)"
 if [[ -n "$WORKFLOW_DSH" && -n "$DOCKERFILE_DSH" && "$WORKFLOW_DSH" != "$DOCKERFILE_DSH" ]]; then
   printf '\n⚠ dsh 版本不一致：workflow 默认=%s，Dockerfile ARG=%s\n' "$WORKFLOW_DSH" "$DOCKERFILE_DSH"
 fi
 if [[ -n "$WORKFLOW_DSH" && -n "$COMPOSE_DSH" && "$WORKFLOW_DSH" != "$COMPOSE_DSH" ]]; then
   printf '⚠ dsh 版本不一致：workflow 默认=%s，compose 默认=%s\n' "$WORKFLOW_DSH" "$COMPOSE_DSH"
-  printf '  升级 dsh 版本前请看 deploy/SYNC-UPSTREAM.md §5 的清单。\n'
+  printf '  升级 dsh 版本前请看 deepseek-harness/deploy/SYNC-UPSTREAM.md §5 的清单。\n'
 fi
 
 if ((TESTS)); then
@@ -95,7 +95,8 @@ fi
 say "导出镜像源码改动（相对 upstream/dev）"
 mkdir -p "$PATCHES"
 rm -f "$PATCHES"/*.diff "$PATCHES"/*.patch "$PATCHES"/*.bundle
-git diff "upstream/dev..HEAD" -- deepseek-harness .dockerignore > "$PATCHES/image-source.diff"
+git diff "upstream/dev..HEAD" -- deepseek-harness .dockerignore \
+  ':(exclude)deepseek-harness/deploy' > "$PATCHES/image-source.diff"
 git bundle create "$PATCHES/plain-http.bundle" "upstream/dev..HEAD" >/dev/null
 printf '%s\n' "$UPSTREAM_SHA" > "$PATCHES/BASE"
 printf 'baseline -> %s（%s）\n' "$PATCHES/BASE" "$UPSTREAM_SHA"
@@ -110,4 +111,4 @@ say "完成"
 printf 'upstream/dev : %s\n' "$UPSTREAM_SHA"
 printf 'plain-http   : %s\n' "$(git rev-parse --short HEAD)"
 printf 'patches/BASE : %s\n' "$(cat "$PATCHES/BASE")"
-printf '\n部署无需额外同步：deploy/ 就在本分支，直接 git pull && cd deploy && docker compose build\n'
+printf '\n部署无需额外同步：deploy 目录就在本分支，直接 git pull && cd deepseek-harness/deploy && docker compose build\n'

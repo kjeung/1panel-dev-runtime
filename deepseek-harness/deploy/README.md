@@ -44,7 +44,7 @@
 
 ```bash
 git clone https://github.com/kjeung/runtime.git
-cd runtime/deploy
+cd runtime/deepseek-harness/deploy
 
 cp .env.example .env
 vi .env                 # 只需改 DSH_ACCESS_HOST
@@ -52,11 +52,11 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
-- compose 的构建上下文是**仓库根**（`context: ..`），Dockerfile 为 `deepseek-harness/Dockerfile`；
+- compose 的构建上下文是**仓库根**（`context: ../..`），Dockerfile 为 `deepseek-harness/Dockerfile`；
   仓库里还包含上游其它镜像源码，首次 build 会多传几十 MB 上下文，属正常。
 - 只想用已构建镜像：设置 `DSH_IMAGE=…`，并删掉 compose 里的 `build:` 与 `pull_policy:` 段。
-- 想在上游原版上复现改造：`deploy/patches/image-source.diff` 是相对上游的镜像源码改动
-  （基线见 `deploy/patches/BASE`），用法见 [patches/README.md](patches/README.md)。
+- 想在上游原版上复现改造：`patches/image-source.diff` 是相对上游的镜像源码改动
+  （基线见 `patches/BASE`），用法见 [patches/README.md](patches/README.md)。
 
 上游更新后如何同步见 [SYNC-UPSTREAM.md](SYNC-UPSTREAM.md)：仓库自带每日自动 PR，
 也可以本地 `scripts/sync-upstream.sh` 手动 rebase。
@@ -285,7 +285,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
   DSH 的 WebSocket 路径、`/api` 栅栏、gzip、300 MiB 上限也可能变化。完整清单见
   [SYNC-UPSTREAM.md §5](SYNC-UPSTREAM.md#5-dsh-版本升级最需要注意的一步)，要点：
   1. 同步上游并重新应用/修正 `patch-dsh-authenticated-settings.mjs` 的匹配字符串；
-  2. 三处版本号保持一致：`deploy/docker-compose.yml` 的 `DSH_VERSION`、`deploy/.env.example`、`.github/workflows/deepseek-harness-release.yml` 默认值；
+  2. 三处版本号保持一致：`docker-compose.yml` 的 `DSH_VERSION`、`.env.example`、`.github/workflows/deepseek-harness-release.yml` 默认值；
   3. 构建后跑端到端（`/healthz`、settings、WebSocket、SSE），再发布。
 
 ## 6. 排障
@@ -351,10 +351,10 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 ## 许可证
 
 本仓库衍生自 1Panel 的 [`runtime`](https://github.com/1Panel-dev/runtime) 项目，其许可证为
-**GPL-3.0**（见 [`LICENSE`](LICENSE)，原样保留）。本仓库新增的 Node 反向代理、部署编排与文档
+**GPL-3.0**（见仓库根 [`LICENSE`](../../../LICENSE)，原样保留）。本仓库新增的 Node 反向代理、部署编排与文档
 同样以 GPL-3.0 分发。
 
-- 以源码或镜像形式分发本项目的任何修改版时，请保留仓库根目录的 `../LICENSE` 与版权声明，
+- 以源码或镜像形式分发本项目的任何修改版时，请保留仓库根目录的 `LICENSE`（即 `../../../LICENSE`）与版权声明，
   并提供对应源码（即本仓库或其 fork）。
 - 若只是在内网自用、不对外分发镜像，则无需额外动作。
 
@@ -364,7 +364,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 |---|---|
 | `docker-compose.yml` | 单容器编排（构建/镜像二选一、健康检查、日志轮转、优雅退出） |
 | `.env.example` | 全部环境变量示例与注释 |
-| `../deepseek-harness/` | 改造后的镜像源码（Dockerfile、entrypoint、node-proxy.mjs、构建期测试） |
+| `../` | 改造后的镜像源码（Dockerfile、entrypoint、node-proxy.mjs、构建期测试） |
 | `patches/` | 相对上游的镜像源码 diff + bundle（基线见 `patches/BASE`）+ 复现说明 |
 | `scripts/sync-upstream.sh` | 一键同步上游：rebase → 测试 → 重新导出 patches → 推送 |
 | `reports/node-proxy-feasibility.md` | 可行性报告与实测数据 |

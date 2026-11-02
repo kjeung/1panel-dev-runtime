@@ -3,8 +3,8 @@
 # 架构：浏览器 → 你的外部反向代理（负责登录认证 + TLS）→ 本容器 8080（Node 转发，无认证）
 #       → 容器内 127.0.0.1:3080（dsh web）
 #
-# 代码位置：本文件在仓库的 deploy/ 下；构建上下文是仓库根（..），
-# 镜像源码在 ../deepseek-harness/。
+# 代码位置：本文件在 deepseek-harness/deploy/ 下；构建上下文是仓库根（../..），
+# 镜像源码在本目录的上一级（../）。
 #
 # 安全前提：容器内**没有任何认证**。8080 端口只能让外部反代访问，
 # 默认只发布到宿主机 127.0.0.1，切勿改成 0.0.0.0 暴露到不可信网络。
@@ -18,14 +18,14 @@ name: deepseek-harness
 
 services:
   deepseek-harness:
-    # 从仓库根构建（context: ..），Dockerfile 在 deepseek-harness/。
+    # 从仓库根构建（context: ../..），Dockerfile 在 deepseek-harness/。
     # 若要使用已构建好的镜像，设置 DSH_IMAGE 并删掉 build + pull_policy 段。
     image: ${DSH_IMAGE:-deepseek-harness:plain}
     # 同时出现 image 与 build 时，Compose 默认「先 pull，pull 不到才 build」，
     # 因此显式声明总是构建；要用已构建镜像请删掉整个 build 段。
     pull_policy: build
     build:
-      context: ..
+      context: ../..
       dockerfile: deepseek-harness/Dockerfile
       args:
         DSH_VERSION: ${DSH_VERSION:-0.2.1-rc.5}

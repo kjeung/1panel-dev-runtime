@@ -5,12 +5,12 @@
 ```
 1Panel-dev/runtime : dev ──(merge/rebase)──▶ kjeung/runtime : plain-http
                                              ├── deepseek-harness/   改造后的镜像源码
-                                             ├── deploy/             部署编排与文档
+                                             ├── deepseek-harness/deploy/   部署编排与文档
                                              ├── .github/workflows/  构建 + 每日同步 workflow
                                              └── （上游其它镜像源码原样保留）
 ```
 
-只有**一个**仓库：部署文件在 `deploy/`，镜像源码在 `deepseek-harness/`，compose 的构建上下文是仓库根。
+只有**一个**仓库：部署文件在 `deepseek-harness/deploy/`，镜像源码在 `deepseek-harness/`，compose 的构建上下文是仓库根。
 
 ## 1. remotes 约定
 
@@ -38,25 +38,25 @@ git remote add upstream https://github.com/1Panel-dev/runtime.git
 - 已有 open PR/issue 时不重复开。
 
 为什么用 merge：rebase 后的分支与 `plain-http` 没有祖先关系，PR 合并会产生重复提交；merge 可 fast-forward。
-想要线性历史时本地跑 `deploy/scripts/sync-upstream.sh`（rebase），之后的 rebase 会自动丢掉 merge 提交，两种方式可共存。
+想要线性历史时本地跑 `deepseek-harness/deepseek-harness/deploy/scripts/sync-upstream.sh`（rebase），之后的 rebase 会自动丢掉 merge 提交，两种方式可共存。
 
 > 定时工作流只在**默认分支**运行，所以本仓库默认分支是 `plain-http`（不是上游的 `dev`）。
 > 副作用：网页 **Sync fork** 等价于「merge upstream/dev 进 plain-http」，与工作流同一模型。
 
-**合并 PR 之后**：不需要再同步任何「部署仓库」——`deploy/` 就在同一分支里。
+**合并 PR 之后**：不需要再同步任何「部署仓库」——`deepseek-harness/deploy/` 就在同一分支里。
 直接重新构建即可：
 
 ```bash
 git pull
-cd deploy && docker compose build && docker compose up -d
+cd deepseek-harness/deploy && docker compose build && docker compose up -d
 ```
 
 ## 3. 手动同步（一行命令）
 
 ```bash
-deploy/scripts/sync-upstream.sh            # fetch + rebase + 自检/测试 + 重新导出 patches
-deploy/scripts/sync-upstream.sh --push     # 再 force-with-lease 推 plain-http
-deploy/scripts/sync-upstream.sh --skip-tests
+deepseek-harness/deploy/scripts/sync-upstream.sh            # fetch + rebase + 自检/测试 + 重新导出 patches
+deepseek-harness/deploy/scripts/sync-upstream.sh --push     # 再 force-with-lease 推 plain-http
+deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
 ```
 
 脚本做的事：
@@ -64,7 +64,7 @@ deploy/scripts/sync-upstream.sh --skip-tests
 1. `git fetch upstream dev`；
 2. 若上游前进：把 `plain-http` **rebase** 到 `upstream/dev`（冲突时停下并给出指引）；
 3. 自检 + 14 个代理测试（本机无 dsh 包时跳过；镜像构建期还会跑）；
-4. 重新导出 `deploy/patches/image-source.diff`、`plain-http.bundle`，更新 `deploy/patches/BASE`；
+4. 重新导出 `deepseek-harness/deploy/patches/image-source.diff`、`plain-http.bundle`，更新 `deepseek-harness/deploy/patches/BASE`；
 5. `--push` 时 `git push --force-with-lease origin plain-http`。
 
 脚本不会自动解决冲突，也**不会**自动改 `DSH_VERSION`。
@@ -78,7 +78,7 @@ deploy/scripts/sync-upstream.sh --skip-tests
 | `deepseek-harness/test-runtime.mjs` | 上游改 Caddy 测试 | 保留 PDF 用例 + 本分支 14 个代理用例 |
 | `deepseek-harness/patch-dsh-authenticated-settings.mjs` | 上游/DSH 改补丁字符串 | 见第 5 节 |
 | `.github/workflows/deepseek-harness-release.yml` | 上游改 tag/输入 | 保留：独立镜像仓库名、`:<dshVersion>` + `:plain` 别名、context |
-| `deploy/**` | 上游没有这个目录 | 一般不会冲突 |
+| `deepseek-harness/deploy/**` | 上游没有这个目录 | 一般不会冲突 |
 
 `deepseek-harness/Caddyfile` 已删除；上游若修改它，保持删除即可。
 
@@ -91,7 +91,7 @@ deploy/scripts/sync-upstream.sh --skip-tests
    需要在 `deepseek-harness/` 里更新匹配字符串。
 2. **行为可能变化**：DSH 的 WebSocket 路径、`/api` 栅栏、gzip、300 MiB 上限都依赖 DSH 实现，
    升级后必须重跑端到端（见下）再发布。
-3. 更新默认版本：`deploy/docker-compose.yml` 的 `DSH_VERSION`、`deploy/.env.example`、
+3. 更新默认版本：`deepseek-harness/deploy/docker-compose.yml` 的 `DSH_VERSION`、`deploy/.env.example`、
    `.github/workflows/deepseek-harness-release.yml` 的 `dshVersion` 默认值，保持三者一致。
 4. 构建镜像并 `docker compose up -d`，确认日志出现
    `DeepSeek Harness is available at http://…:8080`。
@@ -99,9 +99,9 @@ deploy/scripts/sync-upstream.sh --skip-tests
 端到端回归（本机有 dsh 时）：
 
 ```bash
-# 终端 1：真实 dsh（用 deploy/prototype 的加载钩子复刻镜像补丁）
+# 终端 1：真实 dsh（用 deepseek-harness/deploy/prototype 的加载钩子复刻镜像补丁）
 DSH_HOME=$PWD/.e2e/dsh HOME=$PWD/.e2e/dsh/home ONEPANEL_DSH_AUTH_PROXY=1 \
-  node --expose-internals --import ./deploy/prototype/register.mjs \
+  node --expose-internals --import ./deepseek-harness/deploy/prototype/register.mjs \
   /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js web --no-open \
   --host 127.0.0.1 --port 4599 --trusted-host 127.0.0.1:4599 example.test
 # 终端 2：代理
@@ -113,7 +113,7 @@ curl -fsS -X POST -H 'Content-Type: application/json' -H 'Host: example.test' \
   -H 'Origin: http://example.test' \
   -d '{"type":"client-request","rpcId":"1","method":"settings/describe","payload":{"args":{}}}' \
   http://127.0.0.1:8096/api/settings/describe | head -c 120
-node deploy/prototype/ws-test.mjs 8096 example.test http://example.test   # 期望 101
+node deepseek-harness/deploy/prototype/ws-test.mjs 8096 example.test http://example.test   # 期望 101
 ```
 
 ## 6. 验证同步结果
@@ -125,6 +125,6 @@ gh pr list --repo kjeung/runtime --base plain-http --state open
 # 本地源码
 git log --oneline -3
 git rev-parse upstream/dev plain-http
-cat deploy/patches/BASE
+cat deepseek-harness/deploy/patches/BASE
 git status                       # 应为干净
 ```
