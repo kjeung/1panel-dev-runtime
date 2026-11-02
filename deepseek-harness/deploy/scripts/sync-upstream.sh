@@ -34,6 +34,12 @@ done
 
 cd "$ROOT"
 
+# A shallow clone has no merge-base with upstream, so "is upstream an ancestor?"
+# cannot be answered and a rebase would try to replay an already-applied commit.
+if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+  die "当前是浅克隆（shallow clone），无法安全 rebase 上游。请先 git fetch --unshallow（或改用完整 clone）。"
+fi
+
 say "拉取 upstream 与 origin"
 if ! git remote get-url upstream >/dev/null 2>&1; then
   git remote add upstream https://github.com/1Panel-dev/runtime.git

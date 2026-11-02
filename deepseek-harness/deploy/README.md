@@ -59,7 +59,7 @@ docker compose logs -f
   （基线见 `patches/BASE`），用法见 [patches/README.md](patches/README.md)。
 
 上游更新后如何同步见 [SYNC-UPSTREAM.md](SYNC-UPSTREAM.md)：仓库自带每日自动 PR，
-也可以本地 `scripts/sync-upstream.sh` 手动 rebase。
+也可以本地 `scripts/sync-upstream.sh` 手动 rebase（需要完整历史；浅克隆请先 `git fetch --unshallow`）。
 
 日志出现下面两行即就绪：
 

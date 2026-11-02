@@ -68,6 +68,7 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
 5. `--push` 时 `git push --force-with-lease origin plain-http`。
 
 脚本不会自动解决冲突，也**不会**自动改 `DSH_VERSION`。
+脚本需要**完整历史**（浅克隆 `git fetch --unshallow` 后再用）；纯部署用浅克隆没问题。
 
 ## 4. 冲突处理（可预期，集中在这几个文件）
 
