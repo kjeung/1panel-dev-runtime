@@ -19,7 +19,7 @@ on:
         required: true
       imageName:
         description: "Target image repository (plain-HTTP variant, not the Caddy image)"
-        default: "1panel/deepseek-harness-plain"
+        default: "kjeung/deepseek-harness-plain"
         required: true
       pushAlias:
         description: "Also tag the alias ':plain' (in addition to ':<dshVersion>')"
