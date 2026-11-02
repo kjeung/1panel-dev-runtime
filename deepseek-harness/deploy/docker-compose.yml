@@ -2,12 +2,17 @@
 #
 # 架构：浏览器 → 你的外部反向代理（负责登录认证 + TLS）→ 本容器 8080（Node 转发，无认证）
 #       → 容器内 127.0.0.1:3080（dsh web）
+#       → 容器内同一 3080 的 /desktop/（Chromium 桌面，noVNC 静态资源 + RFB 桥接）
 #
 # 代码位置：本文件在 deepseek-harness/deploy/ 下；构建上下文是仓库根（../..），
 # 镜像源码在本目录的上一级（../）。
 #
 # 安全前提：容器内**没有任何认证**。8080 端口只能让外部反代访问，
 # 默认只发布到宿主机 127.0.0.1，切勿改成 0.0.0.0 暴露到不可信网络。
+#
+# 桌面说明：Chromium 桌面不额外开端口，就是同一个 8080 上的 /desktop/。
+# 拿到该路径的人等于拿到容器里的浏览器（能登录你的账号、用你的网络），
+# 因此反代的认证中间件必须覆盖全部路径，包括 /desktop/websockify 的 WebSocket 升级。
 #
 # 用法：
 #   cp .env.example .env        # 只需填 DSH_ACCESS_HOST
@@ -32,6 +37,10 @@ services:
     container_name: deepseek-harness
     restart: unless-stopped
 
+    # Chromium 的渲染进程用 /dev/shm；Docker 默认 64 MiB 会让复杂页面崩渲染进程。
+    # 镜像里的 chromium-docker 在没有足够 /dev/shm 时会退回磁盘共享内存，这里仍建议保留 1 GiB。
+    shm_size: "1gb"
+
     # 不要设置 user:，入口脚本需要 root 修正 /data、/workspace 属主，
     # 随后以 node(1000) 身份降权运行 dsh 与反代。
     environment:
@@ -45,6 +54,15 @@ services:
       PROXY_SHARED_SECRET: ${PROXY_SHARED_SECRET:-}
       # 访问日志（JSON 行，只记 pathname 不记 query；置 0 关闭）
       PROXY_ACCESS_LOG: ${PROXY_ACCESS_LOG:-1}
+      #
+      # 可选：内嵌 Chromium 桌面（默认开启）。置 0 只关闭桌面与 Browser Use，
+      # 镜像仍然包含它们；/desktop/ 与 /browser-desktop/* 会 404。
+      DSH_DESKTOP_ENABLED: ${DSH_DESKTOP_ENABLED:-1}
+      # 可选：Browser Use 工具（默认开启；DSH_DESKTOP_ENABLED=0 时一并关闭）
+      DSH_BROWSER_USE_ENABLED: ${DSH_BROWSER_USE_ENABLED:-1}
+      # 可选：虚拟桌面分辨率（默认 1440x900x24）
+      DSH_DESKTOP_WIDTH: ${DSH_DESKTOP_WIDTH:-1440}
+      DSH_DESKTOP_HEIGHT: ${DSH_DESKTOP_HEIGHT:-900}
       #
       # 可选：dsh 应用层变量（.env 里取消注释后，这里也要取消对应行才会进容器）
       # DSH_PERMISSION_MODE: ${DSH_PERMISSION_MODE:-workspace-write}

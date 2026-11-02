@@ -7,6 +7,12 @@
 #      容器内监听 0.0.0.0:8080；
 #   3) 已存在认证中间件（下面 dsh-auth 只是占位示例，换成你自己的）。
 
+# 内嵌的 Chromium 桌面（/desktop/ 静态资源 + /desktop/websockify 的 RFB WebSocket）
+# 也走下面这同一个 router，不需要第二个 Host、第二个入口点或 stripPrefix：
+#   - 桌面路径是容器内 dsh 自己注册的路由，回源路径必须原样保留；
+#   - 认证中间件已经挂在这个 router 上，因此天然覆盖桌面和它的 WebSocket 升级；
+#   - 不要给它加 buffering / compress（会毁掉桌面 socket 与 SSE 流）。
+
 http:
   routers:
     deepseek-harness:

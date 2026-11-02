@@ -16,7 +16,16 @@
               容器 0.0.0.0:8080  Node 转发（无认证，只做 Host 白名单 + 转发）
                      ▼
               容器 127.0.0.1:3080  dsh web（DSH 自身认证已被补丁旁路）
+                     ├── /api、/plugins/…  DSH 自身
+                     └── /desktop/…        noVNC 资源 + RFB 桥接 ──▶ 127.0.0.1:5900 x11vnc
+                                                                      └─▶ :99 Xvfb + Openbox ──▶ Chromium
 ```
+
+镜像内置一个可见的 Chromium 桌面（Debian Chromium、Noto CJK 中文字体、Xvfb + Openbox、
+x11vnc、noVNC）。它**不额外开端口**，就挂在同一个 8080 的 `/desktop/` 上，
+因此复用同一个域名、证书、Traefik router 与 Authentik 会话；为什么这样选（而不是
+子域名或非标端口）见 [`docs/adr/0001-browser-desktop-access.md`](../../docs/adr/0001-browser-desktop-access.md)，
+用法见本文 [§10](#10-内嵌-chromium-桌面novnc)。
 
 **安全边界完全在容器外**：任何能连到 8080 的人，只要发 `Host: <你的域名>` 就是 owner 全权
 （能改设置、读凭据、执行 Agent 命令）。因此：
@@ -222,6 +231,16 @@ Traefik 排障要点：
 > 注意：compose 只转发 `environment:` 里显式列出的变量。`PROXY_SHARED_SECRET`、`PROXY_ACCESS_LOG`
 > 已默认转发；上表里的 `DSH_PERMISSION_MODE`、`DEEPSEEK_API_KEY` 等在 compose 中是注释行，
 > 在 `.env` 里设置后还需取消 compose 中对应注释，否则不会进入容器。
+
+**内嵌桌面（镜像内置，compose 已转发）**：
+
+| 变量 | 示例值 | 默认值 | 说明 |
+|---|---|---|---|
+| `DSH_DESKTOP_ENABLED` | `1` / `0` | `1` | 置 `0` 完全不启动 Xvfb/Chromium，也不注册 `/desktop/`；Harness 本身照常可用。 |
+| `DSH_BROWSER_USE_ENABLED` | `1` / `0` | `1` | 模型侧 Browser Use 工具（attach 到同一个 Chromium）。`DSH_DESKTOP_ENABLED=0` 时一并失效。 |
+| `DSH_DESKTOP_WIDTH` / `DSH_DESKTOP_HEIGHT` | `1440` / `900` | 同左 | 虚拟桌面分辨率；越大 RFB 流量越大。 |
+| `DSH_DESKTOP_DEPTH` | `24` | `24` | Xvfb 色深。 |
+| `CHROME_USER_DATA_DIR` | `/data/dsh/chrome-profile` | 同左 | 浏览器 profile（登录态、Cookie）落在持久卷内。 |
 
 ### 3.5 部署侧变量（只影响 compose，不进容器）
 
@@ -435,6 +454,11 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 | 502 | 两种来源：① 后端 dsh 未起/连接失败——容器 stderr 有 `upstream error`；② 客户端在响应前取消（刷新页面、关闭标签、`fetch` abort）——旧版代理会误记 502，现改为 499 且不写 stderr。只有同时看到 stderr 的 `upstream error` 才是真故障。 |
 | `499` 且约每 120–125 s 一次（`/plugins/events`） | 外部反代把空闲 SSE 当读超时切断。把该站点的 `proxy_read_timeout` 提到 3600s、`proxy_buffering off`；若前面还有 Cloudflare/LB，需允许 SSE 并依赖应用心跳。 |
 | UI 能打开但永远不刷新、任务无输出 | 外部反代没有转发 WebSocket 升级（缺 `Upgrade`/`Connection` 头）。 |
+| 桌面面板空白或一直“正在连接” | 三种原因：① 反代没转发 `/desktop/websockify` 的 WebSocket 升级；② 反代加了 `buffering`/`compress`；③ 容器内 x11vnc 没起（`docker compose logs` 里有 `desktop-supervisor` 记录，细节在 `/tmp/dsh-desktop/*.log`）。 |
+| `/desktop/vnc.html` 返回 404 | `DSH_DESKTOP_ENABLED=0`，或运行的是不含桌面的旧镜像；确认 `docker compose exec -T deepseek-harness curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/desktop/vnc.html`。 |
+| 面板刚打开就断开，日志反复 `chromium exited; restarting` | `/dev/shm` 太小导致渲染进程崩溃；compose 已设 `shm_size: 1gb`，自定义部署请保留。也可能是 `CHROME_USER_DATA_DIR` 不可写（NFS/权限）。 |
+| 桌面里中文显示成方块 | 镜像缺 `fonts-noto-cjk`：确认用的是本仓库构建的镜像，而不是上游其它镜像。 |
+| 面板 `403 forbidden` | 与其他路径一样：反代改写了 Host（白名单不匹配），或开了 `PROXY_SHARED_SECRET` 但反代没带 `X-DSH-Proxy-Secret`。 |
 | 镜像构建失败：`unexpected browser proxy authentication source shape` / `unexpected PDF worker source shape` / `unexpected web manifest link source shape` / `unexpected HMR SSE close handler source shape` | dsh 版本变了，构建期补丁的精确字符串不再匹配。按 [SYNC-UPSTREAM.md §5](SYNC-UPSTREAM.md#5-dsh-版本升级最需要注意的一步) 更新 `patch-dsh-authenticated-settings.mjs` / `patch-dsh-manifest-sse.mjs`，再跑端到端验证。 |
 | 流式输出变成一次性出现 | 外部反代或中间层缓冲了响应（`proxy_buffering off`、别加 gzip 中间件）。 |
 | 上传文件 413 | 外部反代 `client_max_body_size` 太小（需 ≥300 MiB）。 |
@@ -488,7 +512,97 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 - **重复 Host、尾点 Host** 直接 400（DSH 对尾点是 403，这里提前给出明确错误）。
 - **DeepSeek 官方账号浏览器登录只支持 loopback HTTP**（见 3.7）；通过域名/局域网 IP/反代访问的 Docker
   部署无法完成该登录，请使用 API Key，或按 3.7 的手动回传回调临时登录。
+- **内嵌桌面与 DSH 同生命周期**：容器或 DSH 重启会断开当前的 VNC 会话（浏览器 profile 与登录态保留在
+  `/data/dsh/chrome-profile`）。这是"桌面挂在同一个进程上"的固有取舍，见 ADR 0001。
+- **一个容器一个桌面**：没有按用户隔离，Authentik 之后的所有使用者看到的是同一个 Chromium 和同一套
+  Cookie。需要多租户隔离时，应一个用户/一个任务一个容器。
+- **桌面只支持同源子路径**：`desktopPath` 被校验为同源路径，故意不支持子域名或独立端口（见 ADR 0001）。
+  确需改地址时，要在插件里新增"绝对 origin"模式并重新评估认证与 Cookie。
 
+
+## 10. 内嵌 Chromium 桌面（noVNC）
+
+镜像默认启动一个可见的 Chromium 桌面，并把它作为面板嵌进 Harness UI：
+
+- **Debian Chromium** 跑在 `:99` 的 Xvfb 上，Openbox 提供窗口管理（amd64/arm64 都由 Debian 提供）；
+- **Noto CJK** 与 Liberation 字体，中文页面和截图不会变成方块；
+- **x11vnc** 只监听 `127.0.0.1:5900`、`-nopw`，不对外；
+- **noVNC 1.6.0** 静态资源由 DSH 的 HTTP 服务在 `/desktop/` 提供，RFB 走
+  `/desktop/websockify` 的 WebSocket，由插件在进程内桥接到 x11vnc；
+- **Browser Use**（`@deepseek-ai/dsh-browser-use` + Playwright MCP，`mode: attach`）接到
+  同一个 Chromium 的 `127.0.0.1:9222`，模型操作与人工接管共享标签页、Cookie 和登录态；
+- **`browser_open`** 让模型把一个 URL 打开到这套浏览器里并弹出面板。
+
+### 10.1 为什么没有第二个端口
+
+见 [ADR 0001](../../docs/adr/0001-browser-desktop-access.md)：子域名要新增 DNS、证书和
+Authentik 应用，面板还会变成跨源 iframe（第三方 Cookie 会被浏览器拦）；非标端口要新增
+Traefik entryPoint、放行端口，而且必然绕开 `node-proxy` 的 Host 白名单与共享密钥。
+子路径把桌面放在同一个 origin，认证、证书、会话 Cookie、访问日志与栅栏全部复用。
+
+### 10.2 访问与验证
+
+面板入口是 Harness UI 侧边栏的 🌐 按钮；直接地址是
+`https://<DSH_ACCESS_HOST>/desktop/vnc.html?autoconnect=1&resize=scale&view_only=0&reconnect=1&path=/desktop/websockify`。
+
+容器内冒烟（不经反代，直接问 dsh 本体）：
+
+```bash
+docker compose exec -T deepseek-harness curl -fsS -o /dev/null -w '%{http_code}\n' \
+  http://127.0.0.1:3080/desktop/vnc.html          # 200
+
+docker compose exec -T deepseek-harness curl -fsS http://127.0.0.1:9222/json/version | head -c 120
+
+docker compose exec -T deepseek-harness curl -fsS -o /dev/null -w '%{http_code}\n' \
+  http://127.0.0.1:3080/desktop/defaults.json     # 200
+```
+
+经反代冒烟（Host 必须是 `DSH_ACCESS_HOST`；开了 `PROXY_SHARED_SECRET` 还要带
+`X-DSH-Proxy-Secret`）：
+
+```bash
+curl -fsS -o /dev/null -w '%{http_code}\n' -H 'Host: dsh.example.com' \
+  http://127.0.0.1:8080/desktop/vnc.html          # 200
+
+curl -i -N -H 'Host: dsh.example.com' \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  http://127.0.0.1:8080/desktop/websockify | head -3   # 期望 HTTP/1.1 101
+```
+
+### 10.3 资源与日志
+
+- Chromium 渲染进程用 `/dev/shm`，compose 设了 `shm_size: 1gb`。`/dev/shm` 不足时
+  `chromium-docker` 会自动加 `--disable-dev-shm-usage` 退回磁盘共享内存。
+- 桌面由 `desktop-supervisor.sh` 托管：Chromium / Openbox / x11vnc 退出后原地重启；
+  Xvfb 退出则 supervisor 以非 0 退出，容器按 `restart: unless-stopped` 重建。
+- 桌面进程日志在容器内 `/tmp/dsh-desktop/{xvfb,openbox,x11vnc,chromium}.log`；启动/重启/退出
+  事件打到容器 stderr，即 `docker compose logs`。
+- 关闭桌面：`DSH_DESKTOP_ENABLED=0` 后 `docker compose up -d`（不需要重建镜像）。
+- 备份注意：`/data/dsh/chrome-profile` 会随手用增长（缓存、下载、登录态），`tar czf` 打包 `data/`
+  会把它一起带走；不打算保留浏览器登录态时，可以停容器后先删掉该目录再备份。
+- 本机验证边界与构建后的 runbook 见 [`notes/desktop-integration.md`](notes/desktop-integration.md)。
+
+### 10.4 安全
+
+- 能访问 `/desktop/websockify` 的人就拥有容器里的这个浏览器：能读它的 Cookie、用它出网、
+  操作它打开的页面。认证边界与 Harness UI 完全相同，所以反代中间件必须覆盖 `/desktop`
+  前缀**以及** WebSocket 升级。
+- “认证后剥离反代自己的会话 Cookie 再回源”的建议同样适用于桌面路径。
+- 浏览器 profile 在 `/data/dsh/chrome-profile`，与 DSH 凭据同属高敏感数据，按 `/data/dsh` 的
+  权限与备份流程处理。
+- `x11vnc` 只有 `-localhost -nopw`，Chromium DevTools 只有 `127.0.0.1:9222`，容器仍然只发布
+  一个回环端口。
+
+### 10.5 与上游镜像的差异
+
+| 项 | `runzhliu/deepseek-harness-docker` | 本镜像 |
+| --- | --- | --- |
+| 桌面端口 | 发布 `6080`（noVNC） | 无，挂在 `/desktop/` |
+| RFB 传输 | `websockify`（Python 进程） | 插件内 WebSocket↔TCP 桥接 |
+| noVNC 资源 | Debian `novnc` 包 | 固定 1.6.0，镜像内置（bookworm 的 1.3.0 需要显式 host） |
+| 面板 URL | 改端口（`desktopPort`） | 同源路径，无端口概念 |
+| 认证 | DSH 自身 token/cookie 或 Caddy LAN 网关 | 外部反代（与本镜像既有模型一致） |
 
 ## 许可证
 
@@ -509,9 +623,17 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 | `../` | 改造后的镜像源码（Dockerfile、entrypoint、node-proxy.mjs、构建期测试） |
 | `patches/` | 相对上游的镜像源码 diff + bundle（基线见 `patches/BASE`）+ 复现说明 |
 | `scripts/sync-upstream.sh` | 一键同步上游：rebase → 测试 → 重新导出 patches → 推送 |
+| `../chromium-docker` | Chromium 启动包装：`--no-sandbox` 仅限该进程；`/dev/shm` 太小时退回磁盘共享内存 |
+| `../desktop-supervisor.sh` | Xvfb / Openbox / x11vnc / Chromium 的托管与原地重启 |
+| `../plugins/dsh-browser-desktop/` | noVNC 静态服务 + RFB WebSocket 桥接 + `browser_open` + 面板 |
+| `../web-desktop.cordis.patch.yml` | 把桌面与 Browser Use 插件插入 web profile 的 overlay |
+| [`../../docs/adr/0001-browser-desktop-access.md`](../../docs/adr/0001-browser-desktop-access.md) | 桌面访问方式（子域名/子路径/端口）的论证与决定 |
+| [`notes/desktop-integration.md`](notes/desktop-integration.md) | 上游映射、已验证/未验证项、构建后 runbook、风险清单 |
 | `reports/node-proxy-feasibility.md` | 可行性报告与实测数据 |
 | `notes/implementation-fixes.md` | 独立评审发现的问题与修复/接受记录 |
 | `notes/` | 镜像核查、环境变量审计、Caddy 对照、方案对比 |
 
-镜像内改动已通过构建期测试（`node --test test-runtime.mjs`）：Host/Origin 透传、Authorization 剥除、
-安全头注入、Host 白名单 403、流式不缓冲、WebSocket 101、502、共享密钥、健康检查、4 MB 上传。
+镜像内改动已通过构建期测试：`node --test test-runtime.mjs` 覆盖转发进程（Host/Origin 透传、
+Authorization 剥除、安全头注入、Host 白名单 403、流式不缓冲、WebSocket 101、502、共享密钥、
+健康检查、4 MB 上传）；`node --test test-desktop.mjs` 覆盖桌面（路径几何、静态资源越权、
+帧编解码、真实 WebSocket↔TCP 桥接、路由注册）。

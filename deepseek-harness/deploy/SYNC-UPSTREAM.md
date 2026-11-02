@@ -96,6 +96,16 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
    升级后必须重跑端到端（见下）再发布。
 3. 更新默认版本：`deepseek-harness/deploy/docker-compose.yml` 的 `DSH_VERSION`、`deploy/.env.example`、
    `.github/workflows/deepseek-harness-release.yml` 的 `dshVersion` 默认值，保持三者一致。
+3.5 **桌面集成也要复核**（与 dsh 版本绑定）：
+   - `deepseek-harness/plugins/dsh-browser-desktop/index.js` 依赖 `ctx.webServer.register({kind:'prefix'})` 与
+     `ctx.webServer.registerUpgrade({path})`（`@deepseek-ai/dsh-host-webserver`）。这两个 API 消失或语义变化时，
+     构建期的插件导入测试与 `node -e` 断言会失败，必须按新 API 改写静态路由与 RFB 桥接的挂载方式。
+   - `deepseek-harness/web-desktop.cordis.patch.yml` 依赖 `insert` + `disabled: !!js …` 的 patch 语义；
+     插件名 `@1panel/dsh-browser-desktop` 必须仍能由 `$DSH_HOME/profiles/web/node_modules` 的软链解析。
+   - Browser Use 两个包必须与 `DSH_VERSION` 同版本安装（Dockerfile 的 `browser-use` 阶段），
+     且 Playwright MCP 的 `mode: attach` / `endpoint` 配置键仍受支持。
+   - 构建期会跑 `node --test /tmp/test-dsh-desktop.mjs`（路径几何、静态资源越权、帧编解码、真实 WS↔TCP 桥接、
+     路由注册），失败即阻断发布。
 4. 构建镜像并 `docker compose up -d`，确认日志出现
    `DeepSeek Harness is available at http://…:8080`。
 

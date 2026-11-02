@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+# Chromium's own setuid/namespace sandbox cannot initialize in this container
+# (it drops capabilities and runs as an unprivileged user), so keep the
+# exception scoped to the already isolated browser process instead of weakening
+# the container for every other process.
+set -- --no-sandbox "$@"
+
+# Chromium's renderer allocates shared memory in /dev/shm. Docker's 64 MiB
+# default is too small for real pages and surfaces as renderer crashes, so fall
+# back to disk-backed shared memory unless the operator enlarged it.
+shm_total_kb=$(df -k /dev/shm 2>/dev/null | awk 'NR == 2 { print $2 }')
+if [ -z "${shm_total_kb}" ] || [ "${shm_total_kb}" -lt 262144 ]; then
+  set -- --disable-dev-shm-usage "$@"
+fi
+
+exec /usr/bin/chromium "$@"
