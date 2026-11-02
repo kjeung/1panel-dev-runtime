@@ -18,7 +18,7 @@ Current images in this repository:
 ## Images
 
 - `1panel/comfyui`: ComfyUI runtime image for NVIDIA GPUs, built from matching upstream stable releases
-- `1panel/deepseek-harness`: DeepSeek Harness image with a plain-HTTP Node forwarding proxy, meant to run behind an authenticated TLS reverse proxy
+- `1panel/deepseek-harness`: DeepSeek Harness image with a plain-HTTP Node forwarding proxy and GitHub CLI, meant to run behind an authenticated TLS reverse proxy
 - `1panel/hermes-agent`: Hermes Agent runtime image maintained by 1Panel with bundled messaging channel dependencies
 - `1panel/openclaw`: OpenClaw runtime image built from official source with 1Panel-oriented customizations
 - `1panel/vllm-gb10-dspark`: ARM64 vLLM runtime for DeepSeek V4 Flash on two NVIDIA GB10 nodes

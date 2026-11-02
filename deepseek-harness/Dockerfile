@@ -20,6 +20,8 @@ FROM node:24-bookworm-slim
 ARG PNPM_VERSION=11.7.0
 # Re-declared so the version is recorded as image metadata as well.
 ARG DSH_VERSION=0.2.1-rc.5
+# GitHub CLI release asset; bump the version and both SHA256 values together.
+ARG GH_VERSION=2.103.3
 
 LABEL org.opencontainers.image.source="https://github.com/1Panel-dev/runtime" \
       org.opencontainers.image.url="https://github.com/deepseek-ai/deepseek-harness" \
@@ -40,6 +42,22 @@ RUN apt-get update && \
       ripgrep \
       tini && \
     rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI: pinned official release asset, checked per architecture. The Debian
+# bookworm package is 2.23, so install the current gh binary instead.
+RUN case "$(dpkg --print-architecture)" in \
+      amd64) gh_arch=amd64; gh_sha256=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d ;; \
+      arm64) gh_arch=arm64; gh_sha256=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63 ;; \
+      *) echo "unsupported architecture for gh: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac && \
+    gh_tar="gh_${GH_VERSION}_linux_${gh_arch}.tar.gz" && \
+    curl -fsSLo "/tmp/${gh_tar}" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_tar}" && \
+    echo "${gh_sha256}  /tmp/${gh_tar}" | sha256sum -c - && \
+    tar -xzf "/tmp/${gh_tar}" -C /tmp && \
+    install -D -m 0755 "/tmp/gh_${GH_VERSION}_linux_${gh_arch}/bin/gh" /usr/local/bin/gh && \
+    install -D -m 0644 "/tmp/gh_${GH_VERSION}_linux_${gh_arch}/LICENSE" /usr/share/doc/gh/LICENSE && \
+    rm -rf "/tmp/${gh_tar}" "/tmp/gh_${GH_VERSION}_linux_${gh_arch}" && \
+    gh --version
 
 COPY --from=dsh-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 

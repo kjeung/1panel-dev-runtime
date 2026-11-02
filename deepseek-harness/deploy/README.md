@@ -232,6 +232,139 @@ Traefik 排障要点：
 | `DSH_VERSION` | `0.2.1-rc.5` | `0.2.1-rc.5` | 构建参数，决定镜像内 dsh 版本。 |
 | `DSH_DATA_DIR` / `WORKSPACE_DIR` | `./data/dsh` / `./workspace` | 同左 | 持久化目录。 |
 
+### 3.6 镜像内置 GitHub CLI（gh）
+
+镜像内置官方 `gh`（Dockerfile 构建参数 `GH_VERSION`，默认 `2.103.3`；从 GitHub Release 下载并按架构校验 SHA256），
+可直接在容器或 Agent shell 里执行 `gh --version`、`gh auth status`。已有部署要重新
+`docker compose build && docker compose up -d`（或拉取包含它的新镜像）才会带上它；只 `up -d` 不会更新镜像。
+
+`gh` 的登录态默认写在 `$HOME/.config/gh/hosts.yml`；本镜像 `HOME=/data/dsh/home` 在持久卷内，
+所以登录一次后重启、重建容器都还在。推荐用 token 非交互登录（不依赖浏览器回调）：
+
+```bash
+# token 从标准输入读入，不留在 shell history；建议用最小权限的 fine-grained PAT
+docker compose exec -T -u node -e HOME=/data/dsh/home deepseek-harness \
+  gh auth login --hostname github.com --git-protocol https --with-token < github-token.txt
+
+# 让 git 的 HTTPS 凭据也走 gh（写入 /data/dsh/home/.gitconfig）
+docker compose exec -u node -e HOME=/data/dsh/home deepseek-harness gh auth setup-git
+docker compose exec -u node -e HOME=/data/dsh/home deepseek-harness gh auth status
+```
+
+`gh auth login --web` 也可以用：它走**设备码流程**（终端显示一次性代码，在浏览器打开 GitHub 页面输入），
+不依赖 localhost 回调，因此不受 3.7 的官方账号登录限制影响。
+
+注意：
+
+- **不要**把 `GH_TOKEN` / `GITHUB_TOKEN` 写进 compose 指望 Agent 能用：DSH 启动子进程时会剔除名字含
+  `KEY`/`PASSWORD`/`SECRET`/`TOKEN` 的环境变量（`dsh-subprocess` 的 `scrubbedParentEnv`），
+  Agent 的 shell 看不到它们。请用 `gh auth login` 把凭据落盘。
+- token 在 `/data/dsh` 卷里是明文（`0600`），能读该卷的人或 Agent 都能拿到。请用 fine-grained PAT，
+  只勾选需要的仓库与权限，不要放全账号 classic token；`/data/dsh` 按高敏感卷保护。
+- Agent 的默认文件策略是 `workspace-write`：`gh` 读 `~/.config/gh` 没问题，但在工作区外写缓存/配置可能被
+  沙箱拒绝；`gh pr view`、`gh api`、`git clone` 这类只读/工作区内写入的命令不受影响。
+- `gh auth setup-git` 只覆盖 HTTPS。要 SSH 访问私有仓库，请另行挂载只读 deploy key/SSH key；
+  它同样对 Agent 可见。
+
+### 3.7 为什么在 Docker 里登录不了 DeepSeek 官方账号
+
+DSH 的官方账号登录是 PKCE 浏览器流程：Host 在 `/oauth/callback` 等回调，并把
+`redirect_uri = <浏览器 origin>/oauth/callback` 发给 Platform。上游
+`@deepseek-ai/dsh-deepseek-account-platform` 的 `loginOrigin()` 只接受三种浏览器 origin：
+
+- `http://localhost:<port>`
+- `http://127.0.0.1:<port>`
+- `http://[::1]:<port>`
+
+端口必须显式；`https://`、域名、局域网 IP、带路径的反代一律拒绝。上游 README 把它写成
+known limitation：非 loopback 的反向代理不受支持，只有带显式端口的 `localhost`、`127.0.0.1`
+或 `[::1]` 可用。
+
+本部署的浏览器地址是 `https://dsh.example.com`（或 `http://<局域网IP>:8080`），
+`window.location.origin` 不是 loopback，所以点“登录”时 Host 在发出 `auth_init` 之前就返回
+`protocol` 错误：预打开的标签页被关闭，对话框显示“登录失败”。这不是反代少传了哪个头，
+改 `Host`/`Origin`/`X-Forwarded-*` 都不会修好；把回调强行固定成 loopback，又会落到浏览器所在机器的
+`localhost`，而不是容器。
+
+三个常见现象可以这样区分：
+
+- **点“登录”后标签页立刻关闭/提示失败**：就是上面的 origin 校验拒绝，最常见。
+- **标签页能打开，但 Platform 页面一直加载不出来**：客户端到 `platform.deepseek.com` 的网络/DNS/代理问题；
+  登录页是浏览器加载的，容器的出网不参与，先修客户端网络。
+- **批准后跳到 `http://localhost:...` 报错**：回调落到了客户端本机，不是容器；属于同一条 loopback 限制。
+
+**推荐做法：改用 API Key。** 首次引导页选“添加 API Key”，或进 Settings → Models 填 DeepSeek API Key；
+它写入 `/data/dsh/.credentials.yaml`（`0600`），随 `/data/dsh` 持久化，且优先于环境变量。
+纯自动化部署可用 compose 的 `DEEPSEEK_API_KEY`（见 3.4）。官方账号登录换来的也是平台 API Key/额度，
+API Key 是这条链路上受支持的等价入口。
+
+如果只是要账号下的额度/Key：直接在客户端浏览器打开 `https://platform.deepseek.com` 登录，创建 API Key，
+再回 DSH 的 Settings → Models 粘贴即可；这一步不经过 DSH 的回调，因此不受本限制影响。
+
+不要通过 fork 改 `loginOrigin()` 来接受域名：这是上游的登录安全边界，不属于受支持配置，升级也会失效。
+
+**如果必须用官方账号登录**（例如只能用账号余额）：可以用“手动回传回调”完成。它不改 DSH 源码，
+也不需要本地端口转发：在浏览器里发起一个 loopback 回调的登录，把 Platform 重定向出的 callback URL
+复制到容器里用 `curl` 执行。这条链路依赖 DSH 内部 RPC，属于未支持操作；已在 `0.2.1-rc.5` +
+本地 mock Platform 上验证，DSH 升级后可能失效。
+
+1. 在 DSH 页面打开 DevTools Console，执行下面的脚本。它先用 loopback 作为 `callbackOrigin` 发起登录：
+
+   ```js
+   const rpc = async (method, args) => {
+     const rpcId = crypto.randomUUID()
+     const response = await fetch(`/api/${method}`, {
+       method: 'POST',
+       headers: { 'content-type': 'application/json' },
+       body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args } }),
+     })
+     const body = await response.json()
+     if (!body.result?.ok) throw new Error(JSON.stringify(body.result?.error ?? body))
+     return body.result.value
+   }
+
+   const current = await rpc('account/getState', {})
+   if (current.status === 'credential-stored') throw new Error('already signed in')
+   if (current.attempt && !['failed', 'cancelled', 'expired'].includes(current.attempt.phase)) {
+     await rpc('account/cancelSignIn', { attemptId: current.attempt.id })
+   }
+
+   await rpc('account/startSignIn', {
+     client: {
+       version: '0.2.1-rc.5', // 换成 dsh --version 的当前值
+       locale: navigator.language,
+       timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
+     },
+     callbackOrigin: 'http://127.0.0.1:3080',
+     loginSource: 'web',
+   })
+
+   let view
+   for (let i = 0; i < 50; i++) {
+     view = await rpc('account/getState', {})
+     if (view.attempt?.authorizeUrl) break
+     await new Promise((resolve) => setTimeout(resolve, 200))
+   }
+   if (!view.attempt?.authorizeUrl) throw new Error(JSON.stringify(view))
+   console.log(view.attempt.authorizeUrl)
+   ```
+
+2. 控制台会打印 `authorizeUrl`。在浏览器新标签打开它，完成 DeepSeek 授权。
+
+3. Platform 会跳到 `http://127.0.0.1:3080/oauth/callback?code=...&state=...`；浏览器打不开是正常的。
+   复制完整 URL（或在 DevTools Network 里看 302 的 `Location`），在容器内执行：
+
+   ```bash
+   docker compose exec -T deepseek-harness \
+     curl -i 'http://127.0.0.1:3080/oauth/callback?code=...&state=...'
+   ```
+
+4. 看到 `302` 且 `location` 指向 `platform.deepseek.com/dsh/authorized` 即成功；回到 DSH 页面，
+   登录对话框应关闭，不关就刷新。凭据已写入 `/data/dsh/.credentials.yaml`。
+
+注意：callback URL 含一次性 `code`/`state`，不要在日志或聊天里传播；默认 10 分钟内完成；
+脚本会先取消旧的登录 attempt，但不要在点击“登录”产生失败 attempt 后直接执行。
+
 ## 4. 数据、备份与恢复
 
 | 容器路径 | 内容 | 必须持久化 |
@@ -296,6 +429,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 |---|---|
 | 页面白屏、`/api` 403 `forbidden` | `DSH_ACCESS_HOST` 与浏览器地址不一致（含端口差异）；或外部反代改写了 Host（用了 `$host` 丢端口）。 |
 | `401 unauthorized`、容器起不来、日志 `did not become ready` | 镜像补丁丢失或被去掉（`ONEPANEL_DSH_AUTH_PROXY`/`isAuthenticated` 补丁）。必须保留。 |
+| 点“登录 DeepSeek 账号”后标签页关闭、提示“登录失败” | 官方账号登录只支持 loopback HTTP（`localhost`/`127.0.0.1`/`[::1]` + 显式端口），当前是域名或局域网 IP 访问，Host 在发起登录前就拒绝。改用 API Key；必须用账号时按 3.7 的手动回传回调临时登录。 |
 | 宿主机 `curl http://127.0.0.1:8080/healthz` 返回 403 | 这是设计行为：`/healthz` 只允许回环来源，经 Docker 端口映射后来源不是回环。在容器内执行，或带 `X-DSH-Proxy-Secret`，或改用 `Host` 冒烟。 |
 | 502 | 后端 dsh 未起/已崩；转发进程会在日志里记 502。 |
 | UI 能打开但永远不刷新、任务无输出 | 外部反代没有转发 WebSocket 升级（缺 `Upgrade`/`Connection` 头）。 |
@@ -317,6 +451,8 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 5. 可开启 `PROXY_SHARED_SECRET`；它挡不住能直连端口的人，但能拦住误配置的旁路。
 6. 不要把宿主机根目录、`/var/run/docker.sock`、`~/.ssh` 挂进 `/workspace`；Agent 在该目录内默认可写可执行。
 7. DSH 仍是开发者预览版，升级前备份；`/workspace` 不要放敏感数据。
+8. `gh` 的 token（`/data/dsh/home/.config/gh/hosts.yml`）与 DSH 的 `.credentials.yaml` 都在 `/data/dsh`；
+   能读该卷的人或 Agent 等于拿到这些凭据，请按 root 级敏感数据保护。
 
 ## 8. 与旧镜像（Caddy 版）的差异
 
@@ -348,6 +484,8 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 - **后端 `Server` / `X-Powered-By` 头**会被剥离；错误响应统一为 `bad gateway` / `gateway timeout` /
   `forbidden` 等通用文本，详细原因只写容器日志，避免泄露内部地址。
 - **重复 Host、尾点 Host** 直接 400（DSH 对尾点是 403，这里提前给出明确错误）。
+- **DeepSeek 官方账号浏览器登录只支持 loopback HTTP**（见 3.7）；通过域名/局域网 IP/反代访问的 Docker
+  部署无法完成该登录，请使用 API Key，或按 3.7 的手动回传回调临时登录。
 
 
 ## 许可证
