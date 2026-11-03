@@ -12,6 +12,7 @@ const pluginRoot = process.env.DSH_DESKTOP_PLUGIN_ROOT ?? '/opt/deepseek-harness
 const paths = await import(join(pluginRoot, 'paths.js'))
 const { createStaticHandler, contentType, entityTag } = await import(join(pluginRoot, 'static.js'))
 const { FrameParser, acceptKey, acceptUpgrade, bridgeToTcp, encodeFrame, replyCloseCode } = await import(join(pluginRoot, 'ws-bridge.js'))
+const { isSameOriginRequest, normalizeAuthority } = await import(join(pluginRoot, 'origin.js'))
 
 // ---------------------------------------------------------------------------
 // Path geometry: every URL the panel embeds must stay on the Harness origin.
@@ -62,8 +63,8 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
 }
 
-async function startAssetServer(root) {
-  const handler = createStaticHandler({ root, basePath: '/desktop' })
+async function startAssetServer(root, entryPath) {
+  const handler = createStaticHandler({ root, basePath: '/desktop', entryPath })
   const server = http.createServer((request, response) => {
     handler(request, response).catch((error) => {
       response.writeHead(500)
@@ -96,12 +97,16 @@ test('the desktop serves the noVNC viewer and its assets', async (t) => {
   assert.equal(viewer.status, 200)
   assert.match(viewer.headers['content-type'], /^text\/html/)
   assert.equal(viewer.headers['x-content-type-options'], 'nosniff')
+  // The viewer may only be framed by this origin.
+  assert.equal(viewer.headers['x-frame-options'], 'SAMEORIGIN')
+  assert.match(viewer.headers['content-security-policy'], /frame-ancestors 'self'/)
   assert.match(viewer.headers.etag, /^W\//)
   assert.equal(viewer.body, '<!doctype html><title>noVNC</title>\n')
 
   const module = await request(server.port, { path: '/desktop/app/ui.js' })
   assert.equal(module.status, 200)
   assert.match(module.headers['content-type'], /^text\/javascript/)
+  assert.equal(module.headers['x-frame-options'], undefined, 'frame policy belongs to documents, not scripts')
 
   const defaults = await request(server.port, { path: '/desktop/defaults.json' })
   assert.equal(defaults.status, 200)
@@ -110,6 +115,19 @@ test('the desktop serves the noVNC viewer and its assets', async (t) => {
   const redirect = await request(server.port, { path: '/desktop/' })
   assert.equal(redirect.status, 302)
   assert.equal(redirect.headers.location, '/desktop/vnc.html')
+})
+
+test('the desktop redirects its mount point to the configured viewer', async (t) => {
+  const assets = await createAssetRoot()
+  const viewer = '/desktop/vnc.html?autoconnect=1&resize=scale&path=%2Fdesktop%2Fwebsockify'
+  const server = await startAssetServer(assets.root, viewer)
+  t.after(async () => { await server.close(); await assets.cleanup() })
+
+  for (const path of ['/desktop', '/desktop/']) {
+    const redirect = await request(server.port, { path })
+    assert.equal(redirect.status, 302, `expected a redirect for ${path}`)
+    assert.equal(redirect.headers.location, viewer)
+  }
 })
 
 test('the desktop refuses escapes, listings and unsupported methods', async (t) => {
@@ -158,9 +176,36 @@ test('asset content types and validators are stable', () => {
   assert.equal(contentType('a/b/logo.svg'), 'image/svg+xml')
   assert.equal(contentType('a/b/novnc.ico'), 'image/x-icon')
   assert.equal(contentType('a/b/unknown.bin'), 'application/octet-stream')
+  // noVNC ships both bell formats; a wrong type under nosniff can silence it.
+  assert.equal(contentType('a/b/bell.mp3'), 'audio/mpeg')
+  assert.equal(contentType('a/b/bell.oga'), 'audio/ogg')
   const stats = { size: 256, mtimeMs: 1_700_000_000_000 }
   assert.equal(entityTag(stats), entityTag({ ...stats }))
   assert.notEqual(entityTag(stats), entityTag({ ...stats, size: 257 }))
+})
+
+test('the desktop socket is fenced to its own origin', () => {
+  const requestWith = (host, origin) => ({ headers: origin === undefined ? { host } : { host, origin } })
+  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'https://dsh.example.com')), true)
+  // A default port is the same authority, and authority casing never matters.
+  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'https://DSH.Example.COM:443')), true)
+  assert.equal(isSameOriginRequest(requestWith('dsh.example.com:8443', 'https://dsh.example.com:8443')), true)
+  // A different peer, a different port and a different scheme-bearing host fail.
+  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'https://evil.example')), false)
+  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'https://dsh.example.com.evil.example')), false)
+  assert.equal(isSameOriginRequest(requestWith('dsh.example.com:8443', 'https://dsh.example.com')), false)
+  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'null')), false)
+  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'file:///etc/passwd')), false)
+  // The upgrade route requires Origin; the POST route tolerates a script client.
+  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', undefined)), true)
+  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', undefined), { require: true }), false)
+  // No Host at all can never establish sameness.
+  assert.equal(isSameOriginRequest({ headers: { origin: 'https://dsh.example.com' } }), false)
+
+  assert.equal(normalizeAuthority('DSH.Example.COM.:443'), 'dsh.example.com')
+  assert.equal(normalizeAuthority('[::1]:443'), '[::1]')
+  assert.equal(normalizeAuthority('[::1]:8443'), '[::1]:8443')
+  assert.equal(normalizeAuthority(''), '')
 })
 
 // ---------------------------------------------------------------------------
@@ -459,6 +504,47 @@ test('the upgrade route refuses non-WebSocket and base64-only clients', async (t
 // Plugin wiring: the route table the Harness web server ends up with.
 // ---------------------------------------------------------------------------
 
+/** Minimal stand-in for the upgraded socket a web server hands to the handler. */
+class FakeSocket {
+  constructor() {
+    this.writes = []
+    this.ends = []
+    this.destroyed = false
+  }
+
+  get output() {
+    return this.writes.join('')
+  }
+
+  get ended() {
+    return this.ends.join('')
+  }
+
+  write(chunk) {
+    this.writes.push(String(chunk))
+    return true
+  }
+
+  end(chunk) {
+    if (chunk !== undefined) this.ends.push(String(chunk))
+    return this
+  }
+
+  destroy() {
+    this.destroyed = true
+  }
+
+  destroySoon() {
+    this.destroyed = true
+  }
+
+  setNoDelay() { return this }
+  pause() { return this }
+  resume() { return this }
+  on() { return this }
+  once() { return this }
+}
+
 test('the plugin mounts the viewer, the socket and the tool routes', async (t) => {
   const assets = await createAssetRoot()
   t.after(() => assets.cleanup())
@@ -487,7 +573,7 @@ test('the plugin mounts the viewer, the socket and the tool routes', async (t) =
     },
   }
 
-  plugin.apply(ctx, { novncRoot: assets.root })
+  plugin.apply(ctx, { novncRoot: assets.root, vncPort: 1 })
   assert.deepEqual(routes.map((route) => [route.kind, route.path]), [
     ['exact', '/browser-desktop/state'],
     ['exact', '/browser-desktop/open'],
@@ -507,6 +593,34 @@ test('the plugin mounts the viewer, the socket and the tool routes', async (t) =
   assert.equal(payload.desktop.path.startsWith('/desktop/vnc.html?'), true)
   assert.equal(new URL(payload.desktop.path, 'https://dsh.example.com').searchParams.get('path'), '/desktop/websockify')
   assert.equal(payload.pollIntervalMs, 750)
+
+  // The upgrade route is fenced: a foreign page or a client without Origin must
+  // never reach the RFB stream, because whoever gets there owns the browser.
+  const upgrade = routes.find((route) => route.kind === 'upgrade')
+  assert.ok(upgrade, 'the plugin must register the RFB upgrade route')
+  const handshake = {
+    upgrade: 'websocket',
+    connection: 'Upgrade',
+    'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+    'sec-websocket-version': '13',
+    host: 'dsh.example.com',
+  }
+  const attempt = (headers) => {
+    const socket = new FakeSocket()
+    upgrade.handler({ headers: { ...handshake, ...headers } }, socket, Buffer.alloc(0))
+    return socket
+  }
+
+  const foreign = attempt({ origin: 'https://evil.example' })
+  assert.match(foreign.ended, /403 Forbidden/)
+  assert.doesNotMatch(foreign.output, /101/)
+
+  const anonymous = attempt({})
+  assert.match(anonymous.ended, /403 Forbidden/)
+  assert.doesNotMatch(anonymous.output, /101/)
+
+  const sameOrigin = attempt({ origin: 'https://dsh.example.com' })
+  assert.match(sameOrigin.output, /101 Switching Protocols/)
 
   // Disposal must release every route it claimed.
   effectCleanup()

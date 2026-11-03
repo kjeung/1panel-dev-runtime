@@ -17,6 +17,7 @@ import {
   normalizeSocketPath,
   viewerPath,
 } from './paths.js'
+import { isSameOriginRequest } from './origin.js'
 import { createStaticHandler } from './static.js'
 import { acceptUpgrade, bridgeToTcp } from './ws-bridge.js'
 
@@ -77,16 +78,6 @@ async function readJson(req) {
   }
   if (body.length === 0) throw new Error('request body is required')
   return JSON.parse(body)
-}
-
-function isSameOrigin(req) {
-  const origin = req.headers.origin
-  if (origin === undefined) return true
-  try {
-    return new URL(origin).host === req.headers.host
-  } catch {
-    return false
-  }
 }
 
 export function apply(ctx, config = {}) {
@@ -216,7 +207,7 @@ export function apply(ctx, config = {}) {
           res.end()
           return
         }
-        if (!isSameOrigin(req)) {
+        if (!isSameOriginRequest(req)) {
           sendJson(res, 403, { error: 'cross-origin requests are not allowed' })
           return
         }
@@ -244,12 +235,21 @@ export function apply(ctx, config = {}) {
         handler: createStaticHandler({
           root: novncRoot,
           basePath,
+          entryPath: pagePath,
           logger: (message) => log('info', message),
         }),
       }))
       disposers.push(ctx.webServer.registerUpgrade({
         path: socketPath,
         handler(request, socket, head) {
+          // Cross-site WebSocket hijacking: a foreign page must not be able to
+          // open the RFB stream with the browser's ambient credentials. Browsers
+          // always send Origin on a WebSocket handshake, so require it here.
+          if (!isSameOriginRequest(request, { require: true })) {
+            log('warn', 'rejected a cross-origin WebSocket upgrade')
+            socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')
+            return
+          }
           if (!acceptUpgrade(request, socket, (message) => log('warn', message))) return
           const bridge = bridgeToTcp({
             socket,

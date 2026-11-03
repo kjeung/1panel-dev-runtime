@@ -28,6 +28,11 @@ const CONTENT_TYPES = new Map([
   ['.txt', 'text/plain; charset=utf-8'],
   ['.map', 'application/json; charset=utf-8'],
   ['.wasm', 'application/wasm'],
+  // noVNC's bell; a wrong type under nosniff can silence it.
+  ['.mp3', 'audio/mpeg'],
+  ['.oga', 'audio/ogg'],
+  ['.ogg', 'audio/ogg'],
+  ['.wav', 'audio/wav'],
 ])
 
 export function contentType(file) {
@@ -84,10 +89,11 @@ export async function resolveAsset(root, relative, knownRealRoot) {
  * @param {object} options
  * @param {string} options.root absolute noVNC asset root
  * @param {string} options.basePath absolute mount path without a trailing slash
+ * @param {string} [options.entryPath] same-origin viewer URL (`/desktop` redirects here)
  * @param {(message: string) => void} [options.logger]
  * @returns {(request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<void>}
  */
-export function createStaticHandler({ root, basePath, logger = () => {} }) {
+export function createStaticHandler({ root, basePath, entryPath = `${basePath}/vnc.html`, logger = () => {} }) {
   const rootPath = path.resolve(root)
   let realRoot
   return async function handleDesktopAsset(request, response) {
@@ -104,8 +110,9 @@ export function createStaticHandler({ root, basePath, logger = () => {} }) {
       return
     }
     if (pathname === basePath || pathname === `${basePath}/`) {
-      // `/desktop` alone is a directory, not a client; send the viewer.
-      response.writeHead(302, { location: `${basePath}/vnc.html`, 'cache-control': 'no-store' })
+      // `/desktop` alone is a directory, not a client: send the configured
+      // viewer, so `autoconnect` and the pinned socket path survive.
+      response.writeHead(302, { location: entryPath, 'cache-control': 'no-store' })
       response.end()
       return
     }
@@ -136,8 +143,9 @@ export function createStaticHandler({ root, basePath, logger = () => {} }) {
       return
     }
 
+    const type = contentType(asset.file)
     const headers = {
-      'content-type': contentType(asset.file),
+      'content-type': type,
       'content-length': String(asset.stats.size),
       'last-modified': asset.stats.mtime.toUTCString(),
       etag,
@@ -146,6 +154,13 @@ export function createStaticHandler({ root, basePath, logger = () => {} }) {
       'cache-control': 'no-cache',
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'same-origin',
+    }
+    if (type.startsWith('text/html')) {
+      // The viewer is meant to be framed by the Harness UI on this origin and
+      // by nothing else: framing it elsewhere enables clickjacking, and a
+      // framed viewer that autoconnects is a live desktop.
+      headers['content-security-policy'] = "frame-ancestors 'self'"
+      headers['x-frame-options'] = 'SAMEORIGIN'
     }
     if (request.method === 'HEAD') {
       response.writeHead(200, headers)

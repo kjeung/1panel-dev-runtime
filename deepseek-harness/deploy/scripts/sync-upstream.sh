@@ -73,7 +73,11 @@ fi
 
 WF="$ROOT/.github/workflows/deepseek-harness-release.yml"
 WORKFLOW_DSH="$(grep -m1 'default: "' "$WF" | sed 's/.*default: "//; s/".*//')"
-DOCKERFILE_DSH="$(sed -n 's/^ARG DSH_VERSION=//p' "$ROOT/deepseek-harness/Dockerfile" | head -1)"
+DOCKERFILE_DSH_VALUES="$(sed -n 's/^ARG DSH_VERSION=//p' "$ROOT/deepseek-harness/Dockerfile")"
+DOCKERFILE_DSH="$(printf '%s\n' "$DOCKERFILE_DSH_VALUES" | head -1)"
+if [[ "$(printf '%s\n' "$DOCKERFILE_DSH_VALUES" | grep -c '^[0-9]')" -gt 1 ]]; then
+  printf '⚠ Dockerfile 有多处 "ARG DSH_VERSION=" 默认值；应只保留第一个（全局）默认值，各阶段用不带值的 ARG 继承\n'
+fi
 COMPOSE_DSH="$(sed -n 's/.*DSH_VERSION:-\{0,1\}\([0-9][^} ]*\).*/\1/p' "$ROOT/deepseek-harness/deploy/docker-compose.yml" | head -1)"
 if [[ -n "$WORKFLOW_DSH" && -n "$DOCKERFILE_DSH" && "$WORKFLOW_DSH" != "$DOCKERFILE_DSH" ]]; then
   printf '\n⚠ dsh 版本不一致：workflow 默认=%s，Dockerfile ARG=%s\n' "$WORKFLOW_DSH" "$DOCKERFILE_DSH"

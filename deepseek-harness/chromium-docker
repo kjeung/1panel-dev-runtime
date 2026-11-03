@@ -1,10 +1,13 @@
 #!/bin/sh
 set -eu
 
-# Chromium's own setuid/namespace sandbox cannot initialize in this container
-# (it drops capabilities and runs as an unprivileged user), so keep the
-# exception scoped to the already isolated browser process instead of weakening
-# the container for every other process.
+# Chromium refuses to start without a usable sandbox, and this image has none:
+# the setuid `chromium-sandbox` helper is deliberately not installed and the
+# container gives the unprivileged `node` user no usable user namespace, so the
+# binary reports "No usable sandbox!". Keep the exception scoped to the browser
+# process launched here instead of weakening the container for everything else.
+# The reference compose also sets `no-new-privileges`, which would block the
+# setuid-helper route anyway: the two options are mutually exclusive.
 set -- --no-sandbox "$@"
 
 # Chromium's renderer allocates shared memory in /dev/shm. Docker's 64 MiB

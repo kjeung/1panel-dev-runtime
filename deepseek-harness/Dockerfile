@@ -1,6 +1,12 @@
+# One default for the whole build: a per-stage default would let the stages
+# drift apart (for example installing Browser Use for an older DSH than the
+# image actually runs). Each stage re-declares the ARG without a value and
+# inherits this one; `--build-arg DSH_VERSION=...` still overrides all of them.
+ARG DSH_VERSION=0.2.1-rc.5
+
 FROM node:24-bookworm-slim AS dsh-builder
 
-ARG DSH_VERSION=0.2.1-rc.5
+ARG DSH_VERSION
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -23,7 +29,7 @@ RUN npm install --prefix /tmp/dsh-browser-compat --no-audit --no-fund \
 # packages that belong to DSH's generated distribution.
 FROM node:24-bookworm-slim AS browser-use
 
-ARG DSH_VERSION=0.2.1-rc.5
+ARG DSH_VERSION
 
 RUN mkdir -p /opt/dsh-browser-use && \
     npm install \
@@ -74,7 +80,7 @@ FROM node:24-bookworm-slim
 
 ARG PNPM_VERSION=11.7.0
 # Re-declared so the version is recorded as image metadata as well.
-ARG DSH_VERSION=0.2.1-rc.5
+ARG DSH_VERSION
 ARG NOVNC_VERSION=1.6.0
 
 LABEL org.opencontainers.image.source="https://github.com/1Panel-dev/runtime" \
@@ -171,6 +177,12 @@ RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh \
     node -e "Promise.all([import('/opt/deepseek-harness/plugins/dsh-browser-desktop/index.js'), import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-browser-use/lib/index.js'), import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-browser-use-playwright-mcp/lib/index.js')]).then(([plugin]) => { if (typeof plugin.apply !== 'function' || typeof plugin.viewerPath !== 'function') process.exit(1) })" && \
     node --test /tmp/test-dsh-runtime.mjs && \
     node --test /tmp/test-dsh-desktop.mjs && \
+    node -e "import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js').then(({ WebServer }) => { const proto = WebServer?.prototype; if (typeof proto?.register !== 'function' || typeof proto?.registerUpgrade !== 'function') { console.error('dsh-host-webserver lost register/registerUpgrade: the desktop routes cannot mount'); process.exit(1) } })" && \
+    mkdir -p /tmp/dsh-config-check /tmp/dsh-config-check-home && \
+    DSH_HOME=/tmp/dsh-config-check HOME=/tmp/dsh-config-check-home \
+      node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
+        web --patch /opt/deepseek-harness/web-desktop.cordis.patch.yml --dump-config >/dev/null && \
+    rm -rf /tmp/dsh-config-check /tmp/dsh-config-check-home && \
     rm /tmp/test-dsh-runtime.mjs /tmp/test-dsh-desktop.mjs
 
 ENV DSH_HOME=/data/dsh \

@@ -1,6 +1,6 @@
 {
   "name": "@1panel/dsh-browser-desktop",
-  "version": "0.1.6-1panel.1",
+  "version": "0.1.6-1panel.2",
   "description": "Same-origin Chromium desktop and human-takeover panel for DeepSeek Harness, adapted for the 1Panel plain-HTTP image.",
   "license": "MIT",
   "type": "module",
@@ -9,6 +9,7 @@
     "client.js",
     "cordis.patch.yml",
     "index.js",
+    "origin.js",
     "paths.js",
     "static.js",
     "ws-bridge.js",
