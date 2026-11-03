@@ -80,3 +80,45 @@ WS `101`、尾点 Host 400、未知 Host 403、SSE 首帧正常且访问日志�
 
 未验证（本环境无 docker）：镜像实际构建与运行、镜像内完整 `node --test`（含 PDF 用例）、
 arm64/QEMU 时序、真实 `gosu`/`tini` 行为、compose 的 pull/build 实际动作。
+
+## 6. 插件市场集成与数据卷属主（2026-11-03）
+
+### 6.1 引入问题的提交
+
+`9d861ca`（`feat(deepseek-harness): add a same-origin Chromium/noVNC desktop`）在 entrypoint 里新增
+`link_into_profile`，以 **root** 身份把 browser-use/桌面插件软链进 `/data/dsh/profiles/web/node_modules`。
+它用 `install -d -m 0755 -o node -g node "$(dirname "$link")"`——coreutils 的 `install -d` 只对最终目录
+应用 `-o/-g`（`install.c` 的 `make_ancestor()` 对父目录只做 `mkdir(component, DEFAULT_MODE)`），
+于是新卷上 `profiles`、`profiles/web`、`node_modules` 都是 root:root；旧卷上已存在的 root 属主也永远不会被修。
+DSH 以 uid 1000 运行，`dsh plugin add` / 市场安装直接 `EACCES`。两个上游都没有这段代码路径
+（`1Panel-dev/runtime` 不写 profile；`runzhliu/deepseek-harness-docker` 以 USER node 运行），
+所以这是 fork 引入的缺陷，不是上游继承。
+
+### 6.2 修复
+
+| 位置 | 改动 |
+|---|---|
+| `docker-entrypoint.sh` | 新增 `prepare_dsh_volume`：逐级 `install -d -o node` 创建 `/data/dsh`、`home`、`pnpm-store`、`profiles`、`profiles/web`、`node_modules`；新增 `repair_dsh_volume_ownership`：发现 profile 树里有非 node 属主就 `chown -R -h node:node`；`--self-test` 用临时目录验证"新卷"与"root 属主旧卷"两种输入都归 node |
+| `docker-entrypoint.sh` | 软链镜像内置的 `dshmarket` 到 profile，并追加 `web-market.cordis.patch.yml`；profile 已声明 `dshmarket` 依赖时保留 profile 副本、不追加 overlay（避免 `dsh-market` 行重复插入） |
+| `Dockerfile` | 新增 `dsh-market` 阶段（`npm pack dshmarket@${DSH_MARKET_VERSION}` + 独立前缀安装）并 COPY 进 `…/dsh/node_modules/dshmarket`；`ENV npm_config_store_dir=/data/dsh/pnpm-store`；构建期断言 + `test-market.mjs` + 两个 overlay 的 `--dump-config` |
+| `web-market.cordis.patch.yml` | 插入 `dsh-market` 行，`DSH_MARKET_ENABLED=0` 时禁用，`config.allowRestart: false` |
+| 部署/发布 | compose 转发 `DSH_MARKET_ENABLED`、构建参数 `DSH_MARKET_VERSION`；`.env.example`、release workflow、`sync-upstream.sh` 版本一致性检查同步更新 |
+| 文档 | README §10.7、ADR 0002、SYNC-UPSTREAM §4/§5、本文件 |
+
+### 6.3 验证（本地）
+
+```bash
+bash docker-entrypoint.sh --self-test                    # 0（非 root 时跳过属主断言）
+node --check test-market.mjs
+# 用真实 dshmarket 包做 fixture（DSH 安装目录下没有该包时）
+DSH_MARKET_ROOT=/tmp/market-local/node_modules/dshmarket \
+DSH_MARKET_PATCH=$PWD/web-market.cordis.patch.yml \
+  node --test test-market.mjs                            # 5/5
+DSH_HOME=/tmp/cfg-check HOME=/tmp/cfg-home \
+  node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
+    web --patch "$PWD/web-desktop.cordis.patch.yml" \
+        --patch "$PWD/web-market.cordis.patch.yml" --dump-config | grep -A3 dsh-market
+```
+
+未验证（本环境无 docker）：镜像构建、容器内 `--self-test` 的 root 分支、实际 `chown -R -h` 在
+大卷上的耗时、市场 UI 首次加载与社区插件安装的端到端流程。

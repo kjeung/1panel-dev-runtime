@@ -74,9 +74,11 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
 
 | 文件 | 冲突原因 | 处理原则 |
 |---|---|---|
-| `deepseek-harness/Dockerfile` | 上游改 Caddy 阶段/版本、包列表 | **删除**上游新增的 Caddy 相关行；保留本分支的 node-proxy COPY、8080、`/healthz` |
-| `deepseek-harness/docker-entrypoint.sh` | 上游改认证/证书逻辑 | 保留本分支：无用户名密码、无 CA、启动 node-proxy；保留 uid/gid、就绪等待、`--trusted-host`、`ONEPANEL_DSH_AUTH_PROXY` |
+| `deepseek-harness/Dockerfile` | 上游改 Caddy 阶段/版本、包列表 | **删除**上游新增的 Caddy 相关行；保留本分支的 node-proxy COPY、8080、`/healthz`，以及 `dsh-market` 阶段与 COPY |
+| `deepseek-harness/docker-entrypoint.sh` | 上游改认证/证书逻辑 | 保留本分支：无用户名密码、无 CA、启动 node-proxy；保留 uid/gid、就绪等待、`--trusted-host`、`ONEPANEL_DSH_AUTH_PROXY`，以及数据卷属主修复与 dshmarket 链接 |
 | `deepseek-harness/test-runtime.mjs` | 上游改 Caddy 测试 | 保留 PDF 用例 + 本分支代理用例 |
+| `deepseek-harness/web-market.cordis.patch.yml` | 上游没有这个文件 | fork 新增；保留 overlay 的 `dsh-market` 行与 `allowRestart: false` |
+| `deepseek-harness/test-market.mjs` | 上游没有这个文件 | fork 新增；构建期由 Dockerfile 调用 |
 | `deepseek-harness/patch-dsh-authenticated-settings.mjs` | 上游/DSH 改补丁字符串 | 见第 5 节 |
 | `deepseek-harness/patch-dsh-manifest-sse.mjs` | 上游/DSH 改 Web index 或 HMR SSE | 见第 5 节 |
 | `.github/workflows/deepseek-harness-release.yml` | 上游改 tag/输入 | 保留：独立镜像仓库名、`:<dshVersion>` + `:plain` 别名、context |
@@ -108,6 +110,15 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
      且 Playwright MCP 的 `mode: attach` / `endpoint` 配置键仍受支持。
    - 构建期会跑 `node --test /tmp/test-dsh-desktop.mjs`（路径几何、静态资源越权、帧编解码、真实 WS↔TCP 桥接、
      路由注册），失败即阻断发布。
+3.6 **插件市场版本要单独复核**（`DSH_MARKET_VERSION`，与 `DSH_VERSION` 解耦）：
+   - dshmarket 的 peer 范围写成 `^0.2.1-rc.1` 这类预发布区间；DSH 升到 `0.2.2-alpha.x` 时**不一定满足**
+     （semver 预发布规则：不同 patch 的预发布版本不会落入 `^0.2.1-rc.1`），要同步升 `DSH_MARKET_VERSION`
+     并确认它声明的 dsh 版本下限；
+   - 三个默认值保持一致：`deepseek-harness/Dockerfile` 的 `ARG DSH_MARKET_VERSION`、
+     `deploy/docker-compose.yml` 的 `DSH_MARKET_VERSION`、`.github/workflows/deepseek-harness-release.yml`
+     的 `dshMarketVersion` 输入（`deploy/scripts/sync-upstream.sh` 会检查前两者）；
+   - 构建期会跑 `node --test /tmp/test-dsh-market.mjs`（包身份/bundle 声明/Web 客户端/软链解析/overlay 行）
+     和两个 overlay 的 `--dump-config` 组合，失败即阻断发布。
 4. 构建镜像并 `docker compose up -d`，确认日志出现
    `DeepSeek Harness is available at http://…:8080`。
 

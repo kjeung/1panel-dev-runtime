@@ -87,9 +87,24 @@ if [[ -n "$WORKFLOW_DSH" && -n "$COMPOSE_DSH" && "$WORKFLOW_DSH" != "$COMPOSE_DS
   printf '  升级 dsh 版本前请看 deepseek-harness/deploy/SYNC-UPSTREAM.md §5 的清单。\n'
 fi
 
+DOCKERFILE_MARKET_VALUES="$(sed -n 's/^ARG DSH_MARKET_VERSION=//p' "$ROOT/deepseek-harness/Dockerfile")"
+DOCKERFILE_MARKET="$(printf '%s\n' "$DOCKERFILE_MARKET_VALUES" | head -1)"
+if [[ "$(printf '%s\n' "$DOCKERFILE_MARKET_VALUES" | grep -c '^[0-9]')" -gt 1 ]]; then
+  printf '⚠ Dockerfile 有多处 "ARG DSH_MARKET_VERSION=" 默认值；应只保留第一个（全局）默认值\n'
+fi
+COMPOSE_MARKET="$(sed -n 's/.*DSH_MARKET_VERSION:-\{0,1\}\([0-9][^} ]*\).*/\1/p' "$ROOT/deepseek-harness/deploy/docker-compose.yml" | head -1)"
+WORKFLOW_MARKET="$(awk '/dshMarketVersion:/{found=1;next} found && /default:/{gsub(/.*default: "|".*/,""); print; exit}' "$WF")"
+if [[ -n "$DOCKERFILE_MARKET" && -n "$COMPOSE_MARKET" && "$DOCKERFILE_MARKET" != "$COMPOSE_MARKET" ]]; then
+  printf '⚠ dshmarket 版本不一致：Dockerfile ARG=%s，compose 默认=%s\n' "$DOCKERFILE_MARKET" "$COMPOSE_MARKET"
+fi
+if [[ -n "$WORKFLOW_MARKET" && -n "$DOCKERFILE_MARKET" && "$WORKFLOW_MARKET" != "$DOCKERFILE_MARKET" ]]; then
+  printf '⚠ dshmarket 版本不一致：workflow 默认=%s，Dockerfile ARG=%s\n' "$WORKFLOW_MARKET" "$DOCKERFILE_MARKET"
+fi
+
 if ((TESTS)); then
   say "自检"
   node --check deepseek-harness/node-proxy.mjs
+  node --check deepseek-harness/test-market.mjs
   node deepseek-harness/node-proxy.mjs --self-test
   bash deepseek-harness/docker-entrypoint.sh --self-test
   if [[ -d /usr/local/lib/node_modules/@deepseek-ai/dsh ]]; then
@@ -99,6 +114,12 @@ if ((TESTS)); then
         deepseek-harness/test-runtime.mjs
   else
     echo "跳过代理测试：本机没有安装 @deepseek-ai/dsh（镜像构建期会跑完整测试）"
+  fi
+  if [[ -n "${DSH_MARKET_ROOT:-}" ]]; then
+    say "插件市场测试套件"
+    node --test deepseek-harness/test-market.mjs
+  else
+    echo "跳过插件市场测试：未设置 DSH_MARKET_ROOT（镜像构建期会跑）"
   fi
 fi
 

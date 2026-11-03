@@ -13,6 +13,10 @@ on:
         description: "@deepseek-ai/dsh npm version"
         default: "0.2.1-rc.5"
         required: true
+      dshMarketVersion:
+        description: "dshmarket npm version (community plugin market, independent of DSH)"
+        default: "1.73.9"
+        required: true
       platforms:
         description: "Platforms"
         default: "linux/amd64,linux/arm64"
@@ -58,6 +62,7 @@ jobs:
           push: true
           build-args: |
             DSH_VERSION=${{ inputs.dshVersion }}
+            DSH_MARKET_VERSION=${{ inputs.dshMarketVersion }}
           tags: |
             ${{ inputs.imageName }}:${{ inputs.dshVersion }}
           cache-from: type=gha,scope=deepseek-harness
