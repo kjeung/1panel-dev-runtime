@@ -1,15 +1,17 @@
 diff --git a/.dockerignore b/.dockerignore
 new file mode 100644
-index 0000000..d1948ae
+index 0000000..9372887
 --- /dev/null
 +++ b/.dockerignore
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,8 @@
 +# Keep the build context small; every image in this repository is built from the
 +# repository root and only copies the directory named by its own Dockerfile.
 +.git
 +.github
 +.gitignore
 +**/.DS_Store
++
++deepseek-harness/deploy
 diff --git a/deepseek-harness/Caddyfile b/deepseek-harness/Caddyfile
 deleted file mode 100644
 index fe507d1..0000000
@@ -62,41 +64,185 @@ index fe507d1..0000000
 -	}
 -}
 diff --git a/deepseek-harness/Dockerfile b/deepseek-harness/Dockerfile
-index 6683567..12bd006 100644
+index 6683567..c91ffb6 100644
 --- a/deepseek-harness/Dockerfile
 +++ b/deepseek-harness/Dockerfile
-@@ -1,8 +1,6 @@
+@@ -1,8 +1,15 @@
 -FROM caddy:2.11.4 AS caddy
--
++# One default for the whole build: a per-stage default would let the stages
++# drift apart (for example installing Browser Use for an older DSH than the
++# image actually runs). Each stage re-declares the ARG without a value and
++# inherits this one; `--build-arg DSH_VERSION=...` still overrides all of them.
++ARG DSH_VERSION=0.2.1-rc.5
++# The community plugin market is not a DSH dependency and its peer range tracks
++# the DSH minor line; bump it together with DSH_VERSION (see SYNC-UPSTREAM.md §5).
++ARG DSH_MARKET_VERSION=1.73.9
+ 
  FROM node:24-bookworm-slim AS dsh-builder
  
 -ARG DSH_VERSION=0.2.1-rc.2
-+ARG DSH_VERSION=0.2.1-rc.5
++ARG DSH_VERSION
  
  RUN apt-get update && \
      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-@@ -20,11 +18,14 @@ RUN npm install --prefix /tmp/dsh-browser-compat --no-audit --no-fund \
+@@ -12,70 +19,236 @@ RUN apt-get update && \
+     npm install --global "@deepseek-ai/dsh@${DSH_VERSION}"
+ 
+ COPY deepseek-harness/patch-dsh-authenticated-settings.mjs /tmp/patch-dsh-authenticated-settings.mjs
++COPY deepseek-harness/patch-dsh-manifest-sse.mjs /tmp/patch-dsh-manifest-sse.mjs
+ 
+ RUN npm install --prefix /tmp/dsh-browser-compat --no-audit --no-fund \
+       core-js@3.51.0 esbuild@0.28.2 && \
+-    node /tmp/patch-dsh-authenticated-settings.mjs
++    node /tmp/patch-dsh-authenticated-settings.mjs && \
++    node /tmp/patch-dsh-manifest-sse.mjs
++
++# Official Browser Use plus its Playwright MCP provider, at exactly the DSH
++# version installed above. They are installed outside DSH's package prefix
++# first: adding packages directly to the published DSH tree can make npm prune
++# packages that belong to DSH's generated distribution.
++FROM node:24-bookworm-slim AS browser-use
++
++ARG DSH_VERSION
++
++RUN mkdir -p /opt/dsh-browser-use && \
++    npm install \
++      --prefix /opt/dsh-browser-use \
++      --package-lock=false \
++      --omit=dev \
++      --no-audit \
++      --no-fund \
++      --ignore-scripts \
++      --legacy-peer-deps \
++      "@deepseek-ai/dsh-browser-use@${DSH_VERSION}" \
++      "@deepseek-ai/dsh-experimental-browser-use-playwright-mcp@${DSH_VERSION}" && \
++    test "$(node -p 'require("/opt/dsh-browser-use/node_modules/@deepseek-ai/dsh-browser-use/package.json").version')" = "${DSH_VERSION}" && \
++    test "$(node -p 'require("/opt/dsh-browser-use/node_modules/@deepseek-ai/dsh-experimental-browser-use-playwright-mcp/package.json").version')" = "${DSH_VERSION}" && \
++    npm cache clean --force
++
++# Community plugin market (dshmarket), shipped as image content so a fresh data
++# volume has it without a network install. It is installed outside DSH's prefix
++# first: adding packages directly to DSH's published, generated node_modules can
++# make npm prune packages DSH owns. `--ignore-scripts` matches the Browser Use
++# stage; the package needs no build step.
++FROM node:24-bookworm-slim AS dsh-market
++
++ARG DSH_MARKET_VERSION
++
++RUN mkdir -p /opt/dshmarket && \
++    npm pack --pack-destination /tmp "dshmarket@${DSH_MARKET_VERSION}" && \
++    tar --extract --gzip \
++      --file "/tmp/dshmarket-${DSH_MARKET_VERSION}.tgz" \
++      --strip-components=1 \
++      --directory /opt/dshmarket && \
++    npm install \
++      --prefix /opt/dshmarket \
++      --package-lock=false \
++      --omit=dev \
++      --no-audit \
++      --no-fund \
++      --ignore-scripts \
++      --legacy-peer-deps && \
++    test "$(node -p 'require("/opt/dshmarket/package.json").version')" = "${DSH_MARKET_VERSION}" && \
++    test -f /opt/dshmarket/cordis.patch.yml && \
++    test "$(node -p 'require("/opt/dshmarket/package.json").dsh.bundle.patch')" = "./cordis.patch.yml" && \
++    rm -f "/tmp/dshmarket-${DSH_MARKET_VERSION}.tgz" && \
++    npm cache clean --force
++
++# noVNC is the browser-side VNC client. The Debian 12 package is 1.3.0, which
++# cannot connect over a relative WebSocket URL (it insists on an explicit host);
++# pin the upstream 1.6.0 asset tree instead so the viewer works on any origin
++# and port the operator puts in front of it.
++FROM node:24-bookworm-slim AS novnc
++
++ARG NOVNC_VERSION=1.6.0
++ARG NOVNC_SHA256=5066103959ef4e9b10f37e5a148627360dd8414e4cf8a7db92bdbd022e728aaa
++
++RUN apt-get update && \
++    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
++      ca-certificates \
++      curl && \
++    rm -rf /var/lib/apt/lists/*
++
++RUN set -eux; \
++    curl --fail --location --retry 3 --output /tmp/novnc.tar.gz \
++      "https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz"; \
++    printf '%s  %s\n' "${NOVNC_SHA256}" /tmp/novnc.tar.gz | sha256sum --check --strict -; \
++    mkdir -p /opt/novnc; \
++    tar --extract --gzip --file /tmp/novnc.tar.gz --directory /opt/novnc --strip-components=1; \
++    rm -rf /opt/novnc/.github /opt/novnc/docs /opt/novnc/po /opt/novnc/snap \
++      /opt/novnc/tests /opt/novnc/utils /opt/novnc/karma.conf.js /opt/novnc/eslint.config.mjs; \
++    rm -f /tmp/novnc.tar.gz; \
++    test -f /opt/novnc/vnc.html; \
++    test -f /opt/novnc/app/ui.js; \
++    test -f /opt/novnc/core/rfb.js; \
++    test -f /opt/novnc/defaults.json; \
++    test -f /opt/novnc/mandatory.json
+ 
  FROM node:24-bookworm-slim
  
  ARG PNPM_VERSION=11.7.0
 +# Re-declared so the version is recorded as image metadata as well.
-+ARG DSH_VERSION=0.2.1-rc.5
++ARG DSH_VERSION
++ARG DSH_MARKET_VERSION
++ARG NOVNC_VERSION=1.6.0
  
  LABEL org.opencontainers.image.source="https://github.com/1Panel-dev/runtime" \
        org.opencontainers.image.url="https://github.com/deepseek-ai/deepseek-harness" \
        org.opencontainers.image.title="1Panel DeepSeek Harness" \
 -      org.opencontainers.image.description="DeepSeek Harness image maintained by 1Panel with HTTPS access and persistent runtime data" \
-+      org.opencontainers.image.description="DeepSeek Harness image maintained by 1Panel with plain HTTP access, meant to run behind an authenticated TLS reverse proxy" \
+-      org.opencontainers.image.vendor="1Panel"
+-
++      org.opencontainers.image.description="DeepSeek Harness image maintained by 1Panel with a same-origin Chromium/noVNC desktop and the dsh-market plugin market, meant to run behind an authenticated TLS reverse proxy" \
 +      org.opencontainers.image.version="${DSH_VERSION}" \
-       org.opencontainers.image.vendor="1Panel"
- 
++      org.opencontainers.image.vendor="1Panel" \
++      io.github.1panel.dsh-market-version="${DSH_MARKET_VERSION}"
++
++# Debian Chromium plus the X stack behind the embedded desktop. The desktop has
++# no port of its own: x11vnc binds loopback and the Harness web server bridges
++# the noVNC WebSocket, so the operator's existing TLS + authentication entry
++# point stays the only way in. Noto CJK keeps Chinese pages and screenshots
++# readable; fonts-liberation covers the Latin fallbacks Chromium expects.
++# `websockify` is intentionally absent: the bridge lives in the plugin.
  RUN apt-get update && \
-@@ -40,30 +41,27 @@ RUN apt-get update && \
-       tini && \
+     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       bash \
+       bubblewrap \
+       ca-certificates \
++      chromium \
+       curl \
++      fonts-liberation \
++      fonts-noto-cjk \
+       git \
+       gosu \
++      openbox \
+       openssh-client \
+       ripgrep \
+-      tini && \
++      tini \
++      x11-utils \
++      x11vnc \
++      xvfb && \
      rm -rf /var/lib/apt/lists/*
  
 -COPY --from=caddy /usr/bin/caddy /usr/bin/caddy
++# GitHub CLI: install the latest stable package from GitHub's official apt
++# repository. This intentionally follows upstream, so a rebuild may pick up a
++# newer gh; the build fails if the repository or package is unavailable.
++RUN install -d -m 0755 /etc/apt/keyrings && \
++    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
++      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
++    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
++    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
++      > /etc/apt/sources.list.d/github-cli.list && \
++    apt-get update && \
++    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh && \
++    rm -rf /var/lib/apt/lists/* && \
++    gh --version
++
  COPY --from=dsh-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
++COPY --from=browser-use /opt/dsh-browser-use/node_modules/. /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/
++COPY --from=dsh-market /opt/dshmarket /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/dshmarket
  
  RUN node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
        --help >/dev/null && \
@@ -113,25 +259,77 @@ index 6683567..12bd006 100644
      test "$(gosu node env HOME=/data/dsh/home pnpm --version)" = "$PNPM_VERSION"
  
 -COPY deepseek-harness/Caddyfile /etc/caddy/Caddyfile
++RUN install -d -m 0755 /opt/deepseek-harness && \
++    install -d -m 0755 /usr/share/novnc
++
++COPY --from=novnc /opt/novnc/. /usr/share/novnc/
++
 +COPY deepseek-harness/node-proxy.mjs /usr/local/bin/dsh-node-proxy
  COPY deepseek-harness/dsh /usr/local/bin/dsh
  COPY deepseek-harness/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
++COPY deepseek-harness/chromium-docker /usr/local/bin/chromium-docker
++COPY deepseek-harness/desktop-supervisor.sh /usr/local/bin/dsh-desktop-supervisor
++COPY deepseek-harness/web-desktop.cordis.patch.yml /opt/deepseek-harness/web-desktop.cordis.patch.yml
++COPY deepseek-harness/web-market.cordis.patch.yml /opt/deepseek-harness/web-market.cordis.patch.yml
++COPY deepseek-harness/plugins/dsh-browser-desktop /opt/deepseek-harness/plugins/dsh-browser-desktop
  COPY deepseek-harness/test-runtime.mjs /tmp/test-dsh-runtime.mjs
- 
+-
 -RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh && \
++COPY deepseek-harness/test-desktop.mjs /tmp/test-dsh-desktop.mjs
++COPY deepseek-harness/test-market.mjs /tmp/test-dsh-market.mjs
++
 +RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh \
-+      /usr/local/bin/dsh-node-proxy && \
++      /usr/local/bin/dsh-node-proxy /usr/local/bin/chromium-docker \
++      /usr/local/bin/dsh-desktop-supervisor && \
++    ln -s chromium-docker /usr/local/bin/chrome && \
++    ln -s chromium-docker /usr/local/bin/google-chrome && \
++    ln -s chromium-docker /usr/local/bin/google-chrome-stable && \
++    install -d -m 0755 /opt/deepseek-harness/plugins/dsh-browser-desktop/node_modules/@deepseek-ai && \
++    ln -s /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/schemastery \
++      /opt/deepseek-harness/plugins/dsh-browser-desktop/node_modules/@deepseek-ai/schemastery && \
++    install -d -m 0755 /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@1panel && \
++    ln -s /opt/deepseek-harness/plugins/dsh-browser-desktop \
++      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@1panel/dsh-browser-desktop && \
      dsh --help >/dev/null && \
      /usr/local/bin/docker-entrypoint.sh --self-test && \
 +    /usr/local/bin/dsh-node-proxy --self-test && \
++    chromium-docker --version && \
++    command -v Xvfb openbox x11vnc xdpyinfo >/dev/null && \
++    node -e "Promise.all([import('/opt/deepseek-harness/plugins/dsh-browser-desktop/index.js'), import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-browser-use/lib/index.js'), import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-browser-use-playwright-mcp/lib/index.js')]).then(([plugin]) => { if (typeof plugin.apply !== 'function' || typeof plugin.viewerPath !== 'function') process.exit(1) })" && \
      node --test /tmp/test-dsh-runtime.mjs && \
-     rm /tmp/test-dsh-runtime.mjs
+-    rm /tmp/test-dsh-runtime.mjs
++    node --test /tmp/test-dsh-desktop.mjs && \
++    node --test /tmp/test-dsh-market.mjs && \
++    node -e "Promise.all([import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'), import('node:fs')]).then(([{ evaluatePluginCompatibility, pluginCompatibilityWarning }, fs]) => { const manifest = JSON.parse(fs.readFileSync('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/dshmarket/package.json', 'utf8')); const issue = evaluatePluginCompatibility(manifest, {}); if (issue) { console.error(pluginCompatibilityWarning(issue)); process.exit(1) } })" && \
++    node -e "import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js').then(({ WebServer }) => { const proto = WebServer?.prototype; if (typeof proto?.register !== 'function' || typeof proto?.registerUpgrade !== 'function') { console.error('dsh-host-webserver lost register/registerUpgrade: the desktop routes cannot mount'); process.exit(1) } })" && \
++    mkdir -p /tmp/dsh-config-check /tmp/dsh-config-check-home && \
++    DSH_HOME=/tmp/dsh-config-check HOME=/tmp/dsh-config-check-home \
++      node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
++        web --patch /opt/deepseek-harness/web-desktop.cordis.patch.yml \
++            --patch /opt/deepseek-harness/web-market.cordis.patch.yml --dump-config >/dev/null && \
++    rm -rf /tmp/dsh-config-check /tmp/dsh-config-check-home && \
++    rm /tmp/test-dsh-runtime.mjs /tmp/test-dsh-desktop.mjs /tmp/test-dsh-market.mjs
  
-@@ -72,10 +70,12 @@ ENV DSH_HOME=/data/dsh \
+ ENV DSH_HOME=/data/dsh \
+-    DSH_TELEMETRY_DISABLED=1
++    DSH_TELEMETRY_DISABLED=1 \
++    DSH_NOVNC_VERSION=${NOVNC_VERSION} \
++    npm_config_store_dir=/data/dsh/pnpm-store \
++    DISPLAY=:99 \
++    XDG_RUNTIME_DIR=/tmp/runtime-node \
++    XDG_CACHE_HOME=/data/dsh/home/.cache \
++    XDG_CONFIG_HOME=/data/dsh/home/.config \
++    XDG_DATA_HOME=/data/dsh/home/.local/share \
++    CHROME_BIN=/usr/local/bin/chromium-docker \
++    CHROME_PATH=/usr/local/bin/chromium-docker \
++    BROWSER=/usr/local/bin/chromium-docker \
++    PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/chromium-docker
  
  WORKDIR /workspace
  
 -EXPOSE 8443
++# Only the forwarding proxy is published. The Chromium desktop is served from
++# /desktop on this same port; x11vnc and the DevTools endpoint stay loopback.
 +EXPOSE 8080
  
 -HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
@@ -143,11 +341,187 @@ index 6683567..12bd006 100644
  
  STOPSIGNAL SIGTERM
  
+diff --git a/deepseek-harness/chromium-docker b/deepseek-harness/chromium-docker
+new file mode 100755
+index 0000000..a9b60eb
+--- /dev/null
++++ b/deepseek-harness/chromium-docker
+@@ -0,0 +1,21 @@
++#!/bin/sh
++set -eu
++
++# Chromium refuses to start without a usable sandbox, and this image has none:
++# the setuid `chromium-sandbox` helper is deliberately not installed and the
++# container gives the unprivileged `node` user no usable user namespace, so the
++# binary reports "No usable sandbox!". Keep the exception scoped to the browser
++# process launched here instead of weakening the container for everything else.
++# The reference compose also sets `no-new-privileges`, which would block the
++# setuid-helper route anyway: the two options are mutually exclusive.
++set -- --no-sandbox "$@"
++
++# Chromium's renderer allocates shared memory in /dev/shm. Docker's 64 MiB
++# default is too small for real pages and surfaces as renderer crashes, so fall
++# back to disk-backed shared memory unless the operator enlarged it.
++shm_total_kb=$(df -k /dev/shm 2>/dev/null | awk 'NR == 2 { print $2 }')
++if [ -z "${shm_total_kb}" ] || [ "${shm_total_kb}" -lt 262144 ]; then
++  set -- --disable-dev-shm-usage "$@"
++fi
++
++exec /usr/bin/chromium "$@"
+diff --git a/deepseek-harness/desktop-supervisor.sh b/deepseek-harness/desktop-supervisor.sh
+new file mode 100755
+index 0000000..e4f498d
+--- /dev/null
++++ b/deepseek-harness/desktop-supervisor.sh
+@@ -0,0 +1,143 @@
++#!/usr/bin/env bash
++# Supervise the virtual desktop that the Harness UI exposes through noVNC.
++#
++# The container publishes no VNC port: x11vnc binds loopback and the Harness
++# web server bridges `/desktop/websockify` to it. This script owns Xvfb,
++# Openbox, x11vnc and Chromium so the entrypoint has one PID (and one signal
++# target) for the whole desktop. Chromium, Openbox and x11vnc are restarted in
++# place; a dead Xvfb means the display is gone, so the supervisor exits and the
++# container's restart policy recreates the desktop from a clean state.
++#
++# Logs land in $DSH_DESKTOP_LOG_DIR (default /tmp/dsh-desktop) and are also
++# echoed to stderr on every restart, so `docker compose logs` shows the reason.
++set -uo pipefail
++
++display="${DISPLAY:-:99}"
++width="${DSH_DESKTOP_WIDTH:-1440}"
++height="${DSH_DESKTOP_HEIGHT:-900}"
++depth="${DSH_DESKTOP_DEPTH:-24}"
++vnc_port="${DSH_VNC_PORT:-5900}"
++log_dir="${DSH_DESKTOP_LOG_DIR:-/tmp/dsh-desktop}"
++runtime_dir="${XDG_RUNTIME_DIR:-/tmp/runtime-node}"
++user_data_dir="${CHROME_USER_DATA_DIR:?CHROME_USER_DATA_DIR must be set by the entrypoint}"
++start_url="${CHROME_START_URL:-about:blank}"
++
++mkdir -p "$log_dir" "$runtime_dir" "$user_data_dir"
++chmod 0700 "$runtime_dir"
++
++# A container killed mid-write leaves Chromium's singleton files behind in the
++# persistent profile, and the next start then refuses to open a window.
++rm -f "$user_data_dir/SingletonCookie" "$user_data_dir/SingletonLock" "$user_data_dir/SingletonSocket"
++
++declare -A pidvar=([xvfb]=xvfb_pid [openbox]=openbox_pid [x11vnc]=x11vnc_pid [chromium]=chromium_pid)
++all_pids=()
++xvfb_pid=""
++openbox_pid=""
++x11vnc_pid=""
++chromium_pid=""
++stopping=0
++
++start_component() {
++  local name="$1"
++  case "$name" in
++    xvfb)
++      Xvfb "$display" -screen 0 "${width}x${height}x${depth}" -ac -nolisten tcp \
++        >>"$log_dir/xvfb.log" 2>&1 &
++      ;;
++    openbox)
++      openbox >>"$log_dir/openbox.log" 2>&1 &
++      ;;
++    x11vnc)
++      # -localhost keeps the RFB service off every container interface: only the
++      # Harness process (same loopback namespace) can reach it. Authentication
++      # belongs to the reverse proxy in front of Harness, never to VNC.
++      x11vnc -display "$display" -forever -shared -repeat -noxdamage \
++        -rfbport "$vnc_port" -localhost -nopw >>"$log_dir/x11vnc.log" 2>&1 &
++      ;;
++    chromium)
++      rm -f "$user_data_dir/SingletonCookie" "$user_data_dir/SingletonLock" "$user_data_dir/SingletonSocket"
++      chromium-docker \
++        --user-data-dir="$user_data_dir" \
++        --password-store=basic \
++        --remote-debugging-address=127.0.0.1 \
++        --remote-debugging-port=9222 \
++        --window-position=0,0 \
++        --window-size="${width},${height}" \
++        --no-first-run \
++        --no-default-browser-check \
++        --hide-crash-restore-bubble \
++        "$start_url" >>"$log_dir/chromium.log" 2>&1 &
++      ;;
++    *)
++      printf 'desktop-supervisor: unknown component %s\n' "$name" >&2
++      return 1
++      ;;
++  esac
++  local pid=$!
++  printf -v "${pidvar[$name]}" '%s' "$pid"
++  all_pids+=("$pid")
++  printf 'desktop-supervisor: started %s (pid %s)\n' "$name" "$pid"
++}
++
++cleanup() {
++  trap - TERM INT
++  stopping=1
++  local index pid
++  for (( index=${#all_pids[@]}-1; index >= 0; index-- )); do
++    pid="${all_pids[index]}"
++    kill -TERM "$pid" 2>/dev/null || true
++  done
++  for pid in "${all_pids[@]}"; do
++    wait "$pid" 2>/dev/null || true
++  done
++}
++trap cleanup TERM INT
++
++start_component xvfb
++
++ready=0
++for _ in $(seq 1 100); do
++  if xdpyinfo -display "$display" >/dev/null 2>&1; then
++    ready=1
++    break
++  fi
++  if ! kill -0 "$xvfb_pid" 2>/dev/null; then
++    printf 'desktop-supervisor: Xvfb exited before %s became ready\n' "$display" >&2
++    cat "$log_dir/xvfb.log" >&2
++    exit 1
++  fi
++  sleep 0.1
++done
++if [ "$ready" != 1 ]; then
++  printf 'desktop-supervisor: timed out waiting for virtual display %s\n' "$display" >&2
++  cat "$log_dir/xvfb.log" >&2
++  exit 1
++fi
++
++start_component openbox
++start_component x11vnc
++start_component chromium
++
++# Restart the cheap components in place. One second between attempts doubles as
++# a rate limit if a component keeps dying immediately.
++while (( ! stopping )); do
++  if ! kill -0 "$xvfb_pid" 2>/dev/null; then
++    wait "$xvfb_pid" 2>/dev/null || true
++    printf 'desktop-supervisor: Xvfb exited; the virtual display is gone\n' >&2
++    cleanup
++    exit 1
++  fi
++  for name in openbox x11vnc chromium; do
++    pid="${!pidvar[$name]}"
++    if kill -0 "$pid" 2>/dev/null; then
++      continue
++    fi
++    wait "$pid" 2>/dev/null || true
++    printf 'desktop-supervisor: %s exited; restarting\n' "$name" >&2
++    start_component "$name"
++  done
++  sleep 1
++done
++
++cleanup
++exit 0
 diff --git a/deepseek-harness/docker-entrypoint.sh b/deepseek-harness/docker-entrypoint.sh
-index c7a263e..aece32b 100644
+index c7a263e..75e2e2b 100644
 --- a/deepseek-harness/docker-entrypoint.sh
 +++ b/deepseek-harness/docker-entrypoint.sh
-@@ -5,6 +5,9 @@ is_access_host() {
+@@ -5,18 +5,67 @@ is_access_host() {
    node -e '
      const { isIPv4 } = require("node:net");
      const value = process.argv[1];
@@ -157,16 +531,65 @@ index c7a263e..aece32b 100644
      const hostname = value.length <= 253 && !/^[0-9.]+$/.test(value) &&
        value.split(".").every((label) => /^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$/.test(label));
      process.exit(isIPv4(value) || hostname ? 0 : 1);
-@@ -17,6 +20,8 @@ if [[ "${1:-}" == "--self-test" ]]; then
+   ' "$1"
+ }
+ 
++# Data-volume ownership. DSH runs as `node`; every directory it writes must be
++# node-owned, and `install -d` applies `-o/-g` only to the directory it is given
++# (parents it creates stay root-owned), so every managed level is listed.
++prepare_dsh_volume() {
++  local root="$1"
++  install -d -m 0700 -o node -g node "$root" "$root/home" "$root/pnpm-store"
++}
++
++# A volume inherited from an older image — or touched by a root-run npm/pnpm —
++# can still hold root-owned files. `dsh plugin` and the plugin market's own
++# installs run as node and would fail with EACCES, so repair those trees once
++# per boot. `-h` rewrites symlink ownership without changing the image-owned
++# files the links point at.
++repair_ownership() {
++  local target="$1"
++  [[ -d "$target" ]] || return 0
++  if [[ -n "$(find "$target" -xdev ! -type l ! -user node -print -quit 2>/dev/null)" ]]; then
++    chown -R -h node:node "$target"
++  fi
++}
++
+ if [[ "${1:-}" == "--self-test" ]]; then
+   is_access_host 203.0.113.10
+   is_access_host dsh.example.com
    ! is_access_host https://dsh.example.com
    ! is_access_host 203.0.113.10:10443
    ! is_access_host 203.0.113.999
 +  ! is_access_host 0.0.0.0
 +  ! is_access_host 255.255.255.255
++  # The data volume must belong to node: both a fresh layout and root-owned
++  # trees left by an older image have to come out node-owned.
++  if [[ "$(id -u)" == 0 ]]; then
++    fixture="$(mktemp -d)"
++    mkdir -p "$fixture/data/profiles/web/node_modules" \
++      "$fixture/data/chrome-profile" "$fixture/data/home/.npm"
++    printf '{}\n' > "$fixture/data/profiles/web/package.json"
++    prepare_dsh_volume "$fixture/data"
++    repair_ownership "$fixture/data/profiles"
++    repair_ownership "$fixture/data/chrome-profile"
++    repair_ownership "$fixture/data/home/.npm"
++    for path in "$fixture/data" "$fixture/data/home" "$fixture/data/pnpm-store" \
++                "$fixture/data/profiles/web" \
++                "$fixture/data/profiles/web/node_modules" \
++                "$fixture/data/profiles/web/package.json" \
++                "$fixture/data/chrome-profile" "$fixture/data/home/.npm"; do
++      if [[ "$(stat -c %U "$path")" != node ]]; then
++        printf 'self-test: %s is not owned by node\n' "$path" >&2
++        exit 1
++      fi
++    done
++    rm -rf "$fixture"
++  fi
    exit 0
  fi
  
-@@ -24,31 +29,28 @@ printf '\033[1;32m%s\033[0m\n' 'This image is maintained by 1Panel.'
+@@ -24,33 +73,55 @@ printf '\033[1;32m%s\033[0m\n' 'This image is maintained by 1Panel.'
  printf '\033[1;33m%s\033[0m\n' 'For support or issue discussion, please visit:'
  printf '\033[1;36m%s\033[0m\n' 'https://github.com/1Panel-dev/1Panel/discussions'
  
@@ -175,42 +598,108 @@ index c7a263e..aece32b 100644
 -auth_password="${DSH_AUTH_PASSWORD:-}"
 +# DSH_ACCESS_HOST is the host name browsers use to reach the deployment. It is
 +# only used to fence the backend's /api requests; this container terminates no
-+# TLS. HTTPS_ACCESS_HOST is accepted for compatibility with older deployments.
-+access_host="${DSH_ACCESS_HOST:-${HTTPS_ACCESS_HOST:-}}"
++# TLS. It is the only accepted form: the old Caddy variant's HTTPS_ACCESS_HOST
++# and DSH_AUTH_* settings are not read.
++access_host="${DSH_ACCESS_HOST:-}"
  
--if ! is_access_host "$access_host"; then
+ if ! is_access_host "$access_host"; then
 -  printf 'HTTPS_ACCESS_HOST must be an IPv4 address or hostname without a scheme, path, or port.\n' >&2
--  exit 1
-+if [[ -z "${DSH_ACCESS_HOST:-}" && -n "${HTTPS_ACCESS_HOST:-}" ]]; then
-+  printf 'HTTPS_ACCESS_HOST is deprecated; rename it to DSH_ACCESS_HOST (this container serves plain HTTP).\n' >&2
++  printf 'DSH_ACCESS_HOST is required: an IPv4 address or hostname without a scheme, path, or port (wildcard/broadcast addresses are rejected).\n' >&2
+   exit 1
  fi
  
 -if [[ ! "$auth_username" =~ ^[A-Za-z0-9._-]+$ ]]; then
 -  printf 'DSH_AUTH_USERNAME must contain only letters, numbers, dot, underscore, or hyphen.\n' >&2
-+if ! is_access_host "$access_host"; then
-+  printf 'DSH_ACCESS_HOST must be an IPv4 address or hostname without a scheme, path, or port (wildcard/broadcast addresses are rejected).\n' >&2
-   exit 1
- fi
- 
--if (( ${#auth_password} < 12 )); then
--  printf 'DSH_AUTH_PASSWORD must contain at least 12 characters.\n' >&2
 -  exit 1
 +if [[ "$access_host" == 127.* ]]; then
 +  printf 'Warning: DSH_ACCESS_HOST is a loopback address; the backend also trusts loopback Hosts, so the proxy Host allowlist adds nothing. Use the browser-facing host name.\n' >&2
  fi
  
+-if (( ${#auth_password} < 12 )); then
+-  printf 'DSH_AUTH_PASSWORD must contain at least 12 characters.\n' >&2
+-  exit 1
+-fi
++unset DSH_ACCESS_HOST
+ 
 -password_hash="$(caddy hash-password --algorithm argon2id --plaintext "$auth_password")"
 -unset HTTPS_ACCESS_HOST DSH_AUTH_USERNAME DSH_AUTH_PASSWORD auth_password
-+unset DSH_ACCESS_HOST HTTPS_ACCESS_HOST
- 
- install -d -m 0700 -o node -g node /data/dsh /data/dsh/home
+-
+-install -d -m 0700 -o node -g node /data/dsh /data/dsh/home
  install -d -m 0750 -o node -g node /workspace
 -install -d -m 0700 -o caddy -g caddy /data/caddy /data/caddy/config
++prepare_dsh_volume /data/dsh
++# The profile and the desktop/package caches are written by DSH and the market
++# as node. Repair trees a previous image (or a root-run npm/pnpm) left behind;
++# image plugins themselves are loaded by absolute path (see the overlays), so
++# they never touch the data volume.
++repair_ownership /data/dsh/profiles
++repair_ownership /data/dsh/chrome-profile
++repair_ownership /data/dsh/home/.npm
++repair_ownership /data/dsh/home/.local/share/pnpm
++
++dsh_root=/usr/local/lib/node_modules/@deepseek-ai/dsh
++desktop_patch=/opt/deepseek-harness/web-desktop.cordis.patch.yml
++market_patch=/opt/deepseek-harness/web-market.cordis.patch.yml
++market_source="$dsh_root/node_modules/dshmarket"
++profile_manifest=/data/dsh/profiles/web/package.json
++desktop_enabled="${DSH_DESKTOP_ENABLED:-1}"
++
++# A profile install of the market (`dsh plugin add dshmarket`, which updates
++# itself) owns its own `dsh-market` row through its bundle layer. Leave it in
++# place and do not pass the image overlay, so the row is never inserted twice.
++market_declared=0
++if [[ -f "$profile_manifest" ]] && node -e '
++  const fs = require("node:fs");
++  const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
++  process.exit(Object.hasOwn(manifest.dependencies ?? {}, "dshmarket") ? 0 : 1);
++' "$profile_manifest"; then
++  market_declared=1
++fi
  
  pids=()
++desktop_pid=""
  cleanup() {
-@@ -74,7 +76,7 @@ pids+=("$dsh_pid")
+   if (( ${#pids[@]} )); then
+     kill -TERM "${pids[@]}" 2>/dev/null || true
+@@ -61,20 +132,42 @@ trap cleanup EXIT
+ trap 'exit 143' TERM
+ trap 'exit 130' INT
  
++# The profile name comes first, then the launcher's --patch overlay (composed
++# after the profile's own layer), then the Web app's own flags. Putting --patch
++# before the profile name makes the launcher demand an explicit --profile.
++dsh_args=(web)
++if [[ -f "$desktop_patch" ]]; then
++  dsh_args+=(--patch "$desktop_patch")
++fi
++if [[ -f "$market_patch" ]] && [[ -e "$market_source" ]] && (( ! market_declared )); then
++  dsh_args+=(--patch "$market_patch")
++fi
++dsh_args+=(--no-open --host 127.0.0.1 --port 3080
++  --trusted-host 127.0.0.1:3080 "$access_host")
++
+ gosu node env \
+   HOME=/data/dsh/home \
+   DSH_HOME=/data/dsh \
+   DSH_TELEMETRY_DISABLED=1 \
+   ONEPANEL_DSH_AUTH_PROXY=1 \
+   node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
+-    web --no-open --host 127.0.0.1 --port 3080 \
+-      --trusted-host 127.0.0.1:3080 "$access_host" &
++    "${dsh_args[@]}" &
+ dsh_pid=$!
+ pids+=("$dsh_pid")
+ 
++if [[ "$desktop_enabled" != "0" ]]; then
++  # Chromium keeps its profile in the data volume, so logins and downloads
++  # survive a container upgrade.
++  export CHROME_USER_DATA_DIR="${CHROME_USER_DATA_DIR:-/data/dsh/chrome-profile}"
++  gosu node env HOME=/data/dsh/home \
++    /usr/local/bin/dsh-desktop-supervisor &
++  desktop_pid=$!
++  pids+=("$desktop_pid")
++fi
++
  ready=false
  for _ in {1..60}; do
 -  if curl -fsS --max-time 2 http://127.0.0.1:3080/ >/dev/null 2>&1; then
@@ -218,7 +707,19 @@ index c7a263e..aece32b 100644
      ready=true
      break
    fi
-@@ -90,19 +92,18 @@ if [[ "$ready" != true ]]; then
+@@ -82,6 +175,11 @@ for _ in {1..60}; do
+     wait "$dsh_pid"
+     exit $?
+   fi
++  if [[ -n "$desktop_pid" ]] && ! kill -0 "$desktop_pid" 2>/dev/null; then
++    wait "$desktop_pid" || true
++    printf 'The desktop supervisor exited during startup; check the container log and /tmp/dsh-desktop/.\n' >&2
++    exit 1
++  fi
+   sleep 1
+ done
+ 
+@@ -90,19 +188,27 @@ if [[ "$ready" != true ]]; then
    exit 1
  fi
  
@@ -239,22 +740,31 @@ index c7a263e..aece32b 100644
 +  node /usr/local/bin/dsh-node-proxy &
 +proxy_pid=$!
 +pids+=("$proxy_pid")
++
++printf 'DeepSeek Harness is available at http://%s:8080 inside the container (plain HTTP).\n' "$access_host"
++printf 'This container performs no TLS and no authentication: restrict port 8080 to the trusted reverse proxy.\n'
++if [[ -n "$desktop_pid" ]]; then
++  printf 'The Chromium desktop is served on the same origin at /desktop/ (RFB bridged to 127.0.0.1:5900).\n'
++fi
  
 -printf 'DeepSeek Harness is available at https://%s:8443 inside the container.\n' "$access_host"
 -printf 'The local CA certificate is stored at /data/caddy/pki/authorities/local/root.crt.\n'
-+printf 'DeepSeek Harness is available at http://%s:8080 inside the container (plain HTTP).\n' "$access_host"
-+printf 'This container performs no TLS and no authentication: restrict port 8080 to the trusted reverse proxy.\n'
++wait_pids=("$dsh_pid" "$proxy_pid")
++if [[ -n "$desktop_pid" ]]; then
++  # A dead desktop supervisor must recycle the container, not linger silently.
++  wait_pids+=("$desktop_pid")
++fi
  
  status=0
 -wait -n "$dsh_pid" "$caddy_pid" || status=$?
-+wait -n "$dsh_pid" "$proxy_pid" || status=$?
++wait -n "${wait_pids[@]}" || status=$?
  exit "$status"
 diff --git a/deepseek-harness/node-proxy.mjs b/deepseek-harness/node-proxy.mjs
 new file mode 100644
-index 0000000..4b9986c
+index 0000000..f431a46
 --- /dev/null
 +++ b/deepseek-harness/node-proxy.mjs
-@@ -0,0 +1,486 @@
+@@ -0,0 +1,495 @@
 +#!/usr/bin/env node
 +// Plain-HTTP forwarding proxy for DeepSeek Harness.
 +//
@@ -594,12 +1104,21 @@ index 0000000..4b9986c
 +    const timedOut = error.message === 'upstream response timeout'
 +    // Keep the detail in the container log; the client only sees a generic status.
 +    if (!clientGone) process.stderr.write(`dsh-node-proxy: upstream error: ${error.message}\n`)
++    // The client walked away before the backend answered (page reload, aborted
++    // fetch, closed tab). Destroying the upstream makes it emit an error too, but
++    // that error is a consequence of the cancellation: reporting 502 would blame
++    // the backend for a request nobody is waiting for. nginx calls this 499.
++    if (clientGone) {
++      response.destroy()
++      log(499, 0)
++      return
++    }
 +    if (!response.headersSent) {
 +      reject(response, timedOut ? 504 : 502, timedOut ? 'gateway timeout' : 'bad gateway')
 +      log(timedOut ? 504 : 502, 0)
 +    } else {
 +      response.destroy()
-+      log(clientGone ? 499 : timedOut ? 504 : 502, 0)
++      log(timedOut ? 504 : 502, 0)
 +    }
 +  })
 +  // Client aborted mid-request (including mid-upload): stop the upstream.
@@ -755,8 +1274,2451 @@ index 518f879..2ec6115 100644
  const connectionPath = join(
    await packageRoot('@deepseek-ai/dsh-client-connection'),
    'lib/index.js',
+diff --git a/deepseek-harness/patch-dsh-manifest-sse.mjs b/deepseek-harness/patch-dsh-manifest-sse.mjs
+new file mode 100644
+index 0000000..4209443
+--- /dev/null
++++ b/deepseek-harness/patch-dsh-manifest-sse.mjs
+@@ -0,0 +1,63 @@
++import { readFile, writeFile } from 'node:fs/promises'
++import { createRequire } from 'node:module'
++import { dirname, join, resolve } from 'node:path'
++
++// Build-time patches for the two Web surfaces that need behaviour the upstream
++// prebuilt packages do not provide:
++//   1. the manifest link must request credentials, or a browser behind an
++//      authenticated reverse proxy fetches it without its session cookie;
++//   2. the HMR SSE channel must send a heartbeat, or a reverse proxy with an
++//      idle read timeout cuts the otherwise-silent stream.
++// Both replacements are exact-string matches so a DSH upgrade fails the image
++// build instead of silently shipping an unpatched frontend.
++const dshRoot = resolve(process.argv[2] ?? '/usr/local/lib/node_modules/@deepseek-ai/dsh')
++const requireFromDsh = createRequire(join(dshRoot, 'package.json'))
++
++async function packageRoot(name) {
++  const manifestPath = requireFromDsh.resolve(`${name}/package.json`)
++  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
++  if (manifest.name !== name) throw new Error(`unexpected package at ${manifestPath}`)
++  return dirname(manifestPath)
++}
++
++function replaceOnce(source, original, replacement, label) {
++  const count = source.split(original).length - 1
++  if (count !== 1 || source.includes(replacement)) {
++    throw new Error(`unexpected ${label} source shape: original=${count}`)
++  }
++  return source.replace(original, () => replacement)
++}
++
++// 1. Make the browser send its session cookie when it fetches the manifest.
++// Chrome fetches manifests with credentials omitted unless the link opts in;
++// behind authentik that turns the fetch into a 302 to the SSO host, which the
++// browser then blocks as a cross-origin redirect without CORS headers.
++const frontendRoot = await packageRoot('@deepseek-ai/dsh-web-frontend')
++const indexPath = join(frontendRoot, 'dist/index.html')
++const indexOriginal = '<link rel="manifest" href="./manifest.webmanifest" />'
++const indexReplacement = '<link rel="manifest" href="./manifest.webmanifest" crossorigin="use-credentials" />'
++let indexHtml = replaceOnce(await readFile(indexPath, 'utf8'), indexOriginal, indexReplacement, 'web manifest link')
++if (!indexHtml.includes(indexReplacement)) throw new Error('web manifest link patch verification failed')
++await writeFile(indexPath, indexHtml, 'utf8')
++
++// 2. Keep the HMR SSE stream alive across reverse proxies. The channel sends
++// no data between graph changes, so a 60-120 s idle read timeout (nginx default,
++// Cloudflare, LBs) closes it. A comment frame every 15 s is valid SSE and is
++// ignored by the browser parser.
++const hmrRoot = await packageRoot('@deepseek-ai/dsh-client-hmr')
++const hmrPath = join(hmrRoot, 'lib/index.js')
++const closeHandler = '\t\tres.on("close", () => {\n\t\t\tconnections.delete(res);\n\t\t});'
++const heartbeat = [
++  '\t\tconst heartbeat = setInterval(() => {',
++  '\t\t\tif (res.destroyed || res.writableEnded) return;',
++  '\t\t\ttry { res.write(": ping\\n\\n"); } catch {}',
++  '\t\t}, 15e3);',
++  '\t\theartbeat.unref();',
++  '\t\tres.on("close", () => {',
++  '\t\t\tclearInterval(heartbeat);',
++  '\t\t\tconnections.delete(res);',
++  '\t\t});',
++].join('\n')
++let hmrSource = replaceOnce(await readFile(hmrPath, 'utf8'), closeHandler, heartbeat, 'HMR SSE close handler')
++if (!hmrSource.includes('res.write(": ping\\n\\n")')) throw new Error('HMR SSE heartbeat patch verification failed')
++await writeFile(hmrPath, hmrSource, 'utf8')
+diff --git a/deepseek-harness/plugins/dsh-browser-desktop/LICENSE b/deepseek-harness/plugins/dsh-browser-desktop/LICENSE
+new file mode 100644
+index 0000000..15c03cd
+--- /dev/null
++++ b/deepseek-harness/plugins/dsh-browser-desktop/LICENSE
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2026 DeepSeek Harness Docker contributors
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/deepseek-harness/plugins/dsh-browser-desktop/README.md b/deepseek-harness/plugins/dsh-browser-desktop/README.md
+new file mode 100644
+index 0000000..a47923b
+--- /dev/null
++++ b/deepseek-harness/plugins/dsh-browser-desktop/README.md
+@@ -0,0 +1,110 @@
++# `@1panel/dsh-browser-desktop`
++
++A visible Chromium desktop and human-takeover layer for DeepSeek Harness. It
++embeds the container's browser in a movable, resizable noVNC panel inside the
++Harness UI, and registers the `browser_open` bridge so an Agent can reveal the
++same browser to the user.
++
++This package is a **vendored adaptation** of
++[`@runzhliu/dsh-browser-desktop`](https://github.com/runzhliu/deepseek-harness-docker/tree/main/plugins/dsh-browser-desktop)
++(MIT, see [LICENSE](LICENSE)). The upstream project publishes noVNC on a second
++port and rewrites the browser URL's port. This image publishes exactly one port
++(`8080`, plain HTTP, behind the operator's TLS + auth proxy), so the viewer is
++mounted **on the Harness origin** instead:
++
++| | upstream | here |
++| --- | --- | --- |
++| viewer URL | `https://host:6080/vnc.html` | `https://host/desktop/vnc.html` |
++| static assets | `websockify --web=/usr/share/novnc` | `ctx.webServer` prefix route |
++| RFB transport | websockify (Python) | in-process WebSocket→TCP bridge (`ws-bridge.js`) |
++| RFB endpoint | `127.0.0.1:5900` | same, reached only from the Harness process |
++| extra container port | 6080 | none |
++| auth / TLS | operator's proxy on two entry points | operator's existing single entry point |
++
++The panel is therefore same-origin with the UI it lives in: one Authentik
++application, one certificate, one Traefik router, one set of cookies, and the
++existing `node-proxy` Host allowlist (plus optional `PROXY_SHARED_SECRET`)
++covers the desktop exactly as it covers `/api`. See
++[`docs/adr/0001`](../../../docs/adr/0001-browser-desktop-access.md) for the
++subdomain / sub-path / non-standard-port comparison this decision came from.
++
++## Tests
++
++`deepseek-harness/test-desktop.mjs` runs during the image build (`node --test`)
++and covers the path geometry, the static handler (traversal, symlink escape,
++revalidation), the frame codec, and a live bridge against an echo socket. The
++plugin-wiring case imports `index.js`, which resolves `@deepseek-ai/schemastery`
++from the image; run it in the build or link that package into
++`plugins/dsh-browser-desktop/node_modules` first.
++
++## Routes
++
++| Route | Kind | Purpose |
++| --- | --- | --- |
++| `/desktop/*` | HTTP prefix | noVNC 1.6 assets, revalidated on every load |
++| `/desktop/websockify` | WebSocket upgrade | RFB over WebSocket, bridged to x11vnc; Origin must equal Host |
++| `/browser-desktop/state` | HTTP exact | panel state + viewer path + poll interval |
++| `/browser-desktop/open` | HTTP exact (POST) | `browser_open` over CDP, same-origin only |
++
++`/desktop` redirects to the configured viewer (autoconnect and the pinned socket
++path included). The viewer URL carries an explicit
++`path=/desktop/websockify` query parameter, so noVNC never guesses the
++socket location from the page URL.
++
++## Configuration
++
++The image ships the defaults; override them in the Cordis patch entry
++(`deepseek-harness/web-desktop.cordis.patch.yml`) when the desktop stack moves.
++
++| Field | Default | Meaning |
++| --- | --- | --- |
++| `cdpBaseUrl` | `http://127.0.0.1:9222` | Chromium DevTools endpoint used by `browser_open` |
++| `desktopBasePath` | `/desktop` | mount path for the viewer assets |
++| `desktopPath` | `/vnc.html?autoconnect=1&resize=scale&view_only=0&reconnect=1` | viewer page below the base path |
++| `wsPath` | `<desktopBasePath>/websockify` | upgrade route bridged to the RFB server |
++| `novncRoot` | `/usr/share/novnc` | noVNC 1.6 asset root inside the image |
++| `vncHost` / `vncPort` | `127.0.0.1` / `5900` | x11vnc loopback endpoint |
++| `pingIntervalMs` | `30000` | WebSocket keep-alive ping (idle proxies) |
++| `pollIntervalMs` | `750` | how often the panel polls `/browser-desktop/state` |
++
++## Security
++
++The desktop is a real browser with the container's network position and its
++persisted profile (`/data/dsh/chrome-profile`). Whoever reaches
++`/desktop/websockify` owns that desktop. The image relies on the operator's
++reverse proxy for authentication exactly as it does for the Harness UI:
++
++- the RFB upgrade is fenced like Harness' own `/api` socket: the request's `Origin`
++  must name the same host (and port) as its `Host` header, and a handshake without
++  `Origin` is refused. Without that fence any page the user visits could open
++  `wss://<harness>/desktop/websockify` with the browser's ambient credentials and
++  take the desktop over (cross-site WebSocket hijacking);
++- the viewer document is served with `frame-ancestors 'self'` + `X-Frame-Options:
++  SAMEORIGIN`, so only the Harness UI on this origin may frame it;
++- keep port `8080` reachable only from the authenticated proxy;
++- keep the authenticating middleware on the whole router, including the
++  WebSocket upgrade;
++- do not add `buffering` or `compress` middleware: both the desktop socket and
++  the Harness SSE stream break under them;
++- `x11vnc` binds loopback with `-localhost -nopw`, and Chromium's DevTools port
++  binds `127.0.0.1` only.
++
++## Behaviour notes
++
++- **No `--no-sandbox` weakening beyond the browser.** This image installs neither
++  the setuid `chromium-sandbox` helper nor an unprivileged user namespace, so
++  Chromium reports `No usable sandbox!`; only the `chromium-docker` wrapper
++  passes `--no-sandbox`, scoped to that process. The reference compose also sets
++  `no-new-privileges`, which forecloses the setuid-helper option on purpose.
++- **The panel survives Chromium restarts.** `desktop-supervisor.sh` restarts the
++  browser and the RFB server, while the bridge reports a closed socket to the
++  browser so noVNC reconnects instead of hanging.
++- **A Harness restart ends the desktop stream.** The bridge lives inside the
++  Harness web server; restarting the container drops the VNC session and keeps
++  the browser profile.
++- **Browser Use is per-Session and does not survive a browser restart.** Within
++  one provider instance a single live Session owns the attached browser; other
++  Sessions continue without Browser Use (the panel and `browser_open` remain
++  usable). The supervisor restarts Chromium after a crash or a manual stop, and
++  the provider does not reconnect: create or resume a Session to get the
++  tools back. The noVNC panel, by contrast, reconnects on its own.
+diff --git a/deepseek-harness/plugins/dsh-browser-desktop/client.js b/deepseek-harness/plugins/dsh-browser-desktop/client.js
+new file mode 100644
+index 0000000..7212ed0
+--- /dev/null
++++ b/deepseek-harness/plugins/dsh-browser-desktop/client.js
+@@ -0,0 +1,437 @@
++window.__ModuleLoader__.load({
++  id: '@1panel/dsh-browser-desktop',
++  factory: (require) => {
++    const module = { exports: {} }
++    const React = require('react')
++
++    const zh = window.navigator.language.toLowerCase().startsWith('zh')
++    const messages = {
++      browser: zh ? '浏览器桌面' : 'Browser desktop',
++      browserDialog: zh ? '浏览器桌面 · 人工接管' : 'Browser desktop · Human takeover',
++      browserFrame: zh ? '容器 Chromium 桌面' : 'Container Chromium desktop',
++      close: zh ? '关闭' : 'Close',
++      maximize: zh ? '最大化' : 'Maximize',
++      openNew: zh ? '新窗口打开' : 'Open in new window',
++      openTitle: zh ? '打开浏览器桌面并人工接管' : 'Open browser desktop for human takeover',
++      resize: zh ? '调整浏览器窗口大小' : 'Resize browser window',
++      resizeHint: zh ? '拖动标题栏 · 右下角缩放' : 'Drag title bar · resize from corner',
++      resizeTitle: zh ? '拖动调整窗口大小' : 'Drag to resize',
++      restore: zh ? '还原' : 'Restore'
++    }
++
++    // The desktop is served from a path on the Harness origin (the image
++    // publishes no second port), so only the path travels in the state; the
++    // origin stays whatever the browser is already using.
++    let browserState = {
++      opened: false,
++      desktopPath: '/desktop/vnc.html?autoconnect=1&resize=scale&view_only=0&reconnect=1',
++      pollIntervalMs: 750
++    }
++    let lastBrowserRevision = null
++    const listeners = new Set()
++
++    function updateBrowserState(patch) {
++      const next = { ...browserState, ...patch }
++      if (Object.keys(next).every((key) => next[key] === browserState[key])) return
++      browserState = next
++      for (const listener of listeners) listener()
++    }
++
++    function setOpened(value) {
++      updateBrowserState({ opened: value })
++    }
++
++    function subscribe(listener) {
++      listeners.add(listener)
++      return () => listeners.delete(listener)
++    }
++
++    function useBrowserState() {
++      return React.useSyncExternalStore(subscribe, () => browserState, () => browserState)
++    }
++
++    function useBrowserToolEvents() {
++      React.useEffect(() => {
++        let disposed = false
++        let timer
++
++        async function poll() {
++          try {
++            const response = await fetch('/browser-desktop/state', { cache: 'no-store' })
++            if (!response.ok) throw new Error(`browser state returned HTTP ${response.status}`)
++            const state = await response.json()
++            if (disposed) return
++
++            const desktopPath = typeof state.desktop?.path === 'string' && state.desktop.path.startsWith('/')
++              ? state.desktop.path
++              : browserState.desktopPath
++            const pollIntervalMs = Number.isInteger(state.pollIntervalMs)
++              ? Math.min(10000, Math.max(250, state.pollIntervalMs))
++              : browserState.pollIntervalMs
++            updateBrowserState({ desktopPath, pollIntervalMs })
++
++            if (lastBrowserRevision === null) {
++              lastBrowserRevision = state.revision
++              if (state.revision > 0 && Date.now() - state.openedAt < 15000) setOpened(true)
++            } else if (state.revision !== lastBrowserRevision) {
++              lastBrowserRevision = state.revision
++              setOpened(true)
++            }
++          } catch {
++            // The host half can be briefly unavailable during Harness HMR or
++            // a container restart. The next poll reconnects automatically.
++          } finally {
++            if (!disposed) timer = window.setTimeout(poll, browserState.pollIntervalMs)
++          }
++        }
++
++        poll()
++        return () => {
++          disposed = true
++          if (timer !== undefined) window.clearTimeout(timer)
++        }
++      }, [])
++    }
++
++    function desktopUrl(path) {
++      // Same origin, same port, same authenticating proxy as the Harness UI.
++      return new URL(path, window.location.href).toString()
++    }
++
++    function BrowserButton({ wide }) {
++      return React.createElement(
++        'button',
++        {
++          type: 'button',
++          title: messages.openTitle,
++          'aria-label': messages.openTitle,
++          onClick: () => setOpened(true),
++          style: {
++            boxSizing: 'border-box',
++            width: wide ? '100%' : '36px',
++            height: '36px',
++            margin: wide ? '2px 0' : '2px 0',
++            padding: wide ? '0 12px' : '0',
++            border: '0',
++            borderRadius: '10px',
++            background: 'transparent',
++            color: 'var(--dsw-alias-label-primary)',
++            cursor: 'pointer',
++            display: 'flex',
++            alignItems: 'center',
++            justifyContent: wide ? 'flex-start' : 'center',
++            gap: '9px',
++            fontSize: '14px'
++          }
++        },
++        React.createElement('span', { style: { fontSize: '18px', lineHeight: 1 } }, '🌐'),
++        wide ? React.createElement('span', null, messages.browser) : null
++      )
++    }
++
++    const panelMargin = 12
++
++    function panelBounds(panel) {
++      const parent = panel?.offsetParent
++      if (parent instanceof HTMLElement) {
++        return { width: parent.clientWidth, height: parent.clientHeight }
++      }
++      return {
++        width: document.documentElement.clientWidth,
++        height: document.documentElement.clientHeight
++      }
++    }
++
++    function initialPanelRect(bounds) {
++      const maxWidth = Math.max(280, bounds.width - panelMargin * 2)
++      const maxHeight = Math.max(240, bounds.height - panelMargin * 2)
++      const minWidth = Math.min(420, maxWidth)
++      const minHeight = Math.min(280, maxHeight)
++      const width = Math.min(maxWidth, Math.max(minWidth, Math.round(bounds.width * 0.68)))
++      const height = Math.min(maxHeight, Math.max(minHeight, Math.round(bounds.height * 0.68)))
++      return {
++        x: Math.max(panelMargin, Math.round((bounds.width - width) / 2)),
++        y: Math.max(panelMargin, Math.round((bounds.height - height) / 2)),
++        width,
++        height
++      }
++    }
++
++    function clampPanelRect(rect, bounds) {
++      const maxWidth = Math.max(280, bounds.width - panelMargin * 2)
++      const maxHeight = Math.max(240, bounds.height - panelMargin * 2)
++      const minWidth = Math.min(420, maxWidth)
++      const minHeight = Math.min(280, maxHeight)
++      const width = Math.min(maxWidth, Math.max(minWidth, rect.width))
++      const height = Math.min(maxHeight, Math.max(minHeight, rect.height))
++      return {
++        x: Math.min(Math.max(panelMargin, rect.x), Math.max(panelMargin, bounds.width - width - panelMargin)),
++        y: Math.min(Math.max(panelMargin, rect.y), Math.max(panelMargin, bounds.height - height - panelMargin)),
++        width,
++        height
++      }
++    }
++
++    function maximizedPanelRect(bounds) {
++      return {
++        x: panelMargin,
++        y: panelMargin,
++        width: Math.max(280, bounds.width - panelMargin * 2),
++        height: Math.max(240, bounds.height - panelMargin * 2)
++      }
++    }
++
++    function BrowserOverlay() {
++      useBrowserToolEvents()
++      const { opened: visible, desktopPath } = useBrowserState()
++      const src = React.useMemo(
++        () => desktopUrl(desktopPath),
++        [desktopPath]
++      )
++      const panelRef = React.useRef(null)
++      const interactionRef = React.useRef(null)
++      const restoreRectRef = React.useRef(null)
++      const positionedRef = React.useRef(false)
++      const [maximized, setMaximized] = React.useState(false)
++      const [rect, setRect] = React.useState(() => initialPanelRect({
++        width: document.documentElement.clientWidth,
++        height: document.documentElement.clientHeight
++      }))
++
++      React.useLayoutEffect(() => {
++        if (!visible || positionedRef.current || panelRef.current === null) return
++        setRect(initialPanelRect(panelBounds(panelRef.current)))
++        positionedRef.current = true
++      }, [visible])
++
++      React.useEffect(() => {
++        function move(event) {
++          const interaction = interactionRef.current
++          if (interaction === null || panelRef.current === null) return
++          const bounds = panelBounds(panelRef.current)
++          const deltaX = event.clientX - interaction.pointerX
++          const deltaY = event.clientY - interaction.pointerY
++
++          if (interaction.kind === 'move') {
++            setRect(clampPanelRect({
++              ...interaction.rect,
++              x: interaction.rect.x + deltaX,
++              y: interaction.rect.y + deltaY
++            }, bounds))
++            return
++          }
++
++          setRect(clampPanelRect({
++            ...interaction.rect,
++            width: interaction.rect.width + deltaX,
++            height: interaction.rect.height + deltaY
++          }, bounds))
++        }
++
++        function end() {
++          interactionRef.current = null
++          document.body.style.removeProperty('user-select')
++          document.body.style.removeProperty('cursor')
++        }
++
++        function resizeWindow() {
++          if (panelRef.current === null) return
++          const bounds = panelBounds(panelRef.current)
++          setRect((current) => maximized ? maximizedPanelRect(bounds) : clampPanelRect(current, bounds))
++        }
++
++        window.addEventListener('pointermove', move)
++        window.addEventListener('pointerup', end)
++        window.addEventListener('pointercancel', end)
++        window.addEventListener('resize', resizeWindow)
++        return () => {
++          window.removeEventListener('pointermove', move)
++          window.removeEventListener('pointerup', end)
++          window.removeEventListener('pointercancel', end)
++          window.removeEventListener('resize', resizeWindow)
++          document.body.style.removeProperty('user-select')
++          document.body.style.removeProperty('cursor')
++        }
++      }, [maximized])
++
++      function beginInteraction(kind, event) {
++        if (maximized || event.button !== 0) return
++        if (kind === 'move' && event.target.closest('button')) return
++        event.preventDefault()
++        interactionRef.current = {
++          kind,
++          pointerX: event.clientX,
++          pointerY: event.clientY,
++          rect
++        }
++        document.body.style.setProperty('user-select', 'none')
++        document.body.style.setProperty('cursor', kind === 'move' ? 'move' : 'nwse-resize')
++      }
++
++      function toggleMaximized() {
++        if (panelRef.current === null) return
++        const bounds = panelBounds(panelRef.current)
++        if (maximized) {
++          setRect(clampPanelRect(restoreRectRef.current || initialPanelRect(bounds), bounds))
++          setMaximized(false)
++          return
++        }
++        restoreRectRef.current = rect
++        setRect(maximizedPanelRect(bounds))
++        setMaximized(true)
++      }
++
++      if (!visible) return null
++
++      return React.createElement(
++        'section',
++        {
++          ref: panelRef,
++          role: 'dialog',
++          'aria-modal': 'true',
++          'aria-label': messages.browserDialog,
++          style: {
++            position: 'absolute',
++            left: `${rect.x}px`,
++            top: `${rect.y}px`,
++            width: `${rect.width}px`,
++            height: `${rect.height}px`,
++            boxSizing: 'border-box',
++            zIndex: 100,
++            pointerEvents: 'auto',
++            display: 'flex',
++            flexDirection: 'column',
++            overflow: 'hidden',
++            border: '1px solid var(--dsw-alias-border-l2)',
++            borderRadius: '14px',
++            background: 'var(--dsw-alias-bg-base)',
++            boxShadow: '0 18px 60px rgba(0,0,0,.35)'
++          }
++        },
++        React.createElement(
++          'header',
++          {
++            onPointerDown: (event) => beginInteraction('move', event),
++            onDoubleClick: toggleMaximized,
++            style: {
++              height: '44px',
++              flex: '0 0 44px',
++              padding: '0 10px 0 14px',
++              display: 'flex',
++              alignItems: 'center',
++              gap: '8px',
++              borderBottom: '1px solid var(--dsw-alias-border-l2)',
++              color: 'var(--dsw-alias-label-primary)',
++              cursor: maximized ? 'default' : 'move',
++              userSelect: 'none',
++              touchAction: 'none'
++            }
++          },
++          React.createElement(
++            'strong',
++            {
++              style: {
++                flex: 1,
++                minWidth: 0,
++                overflow: 'hidden',
++                whiteSpace: 'nowrap',
++                fontSize: '14px'
++              }
++            },
++            messages.browserDialog,
++            React.createElement('span', {
++              style: { marginLeft: '8px', fontSize: '12px', fontWeight: 400, opacity: 0.55 }
++            }, messages.resizeHint)
++          ),
++          React.createElement(
++            'button',
++            {
++              type: 'button',
++              onClick: toggleMaximized,
++              style: headerButtonStyle()
++            },
++            maximized ? messages.restore : messages.maximize
++          ),
++          React.createElement(
++            'button',
++            {
++              type: 'button',
++              onClick: () => window.open(src, '_blank', 'noopener,noreferrer'),
++              style: headerButtonStyle()
++            },
++            messages.openNew
++          ),
++          React.createElement(
++            'button',
++            {
++              type: 'button',
++              'aria-label': messages.close,
++              onClick: () => setOpened(false),
++              style: headerButtonStyle()
++            },
++            messages.close
++          )
++        ),
++        React.createElement('iframe', {
++          title: messages.browserFrame,
++          src,
++          allow: 'clipboard-read; clipboard-write',
++          style: { width: '100%', minHeight: 0, flex: 1, border: 0, background: '#111' }
++        }),
++        React.createElement('div', {
++          role: 'separator',
++          'aria-label': messages.resize,
++          title: messages.resizeTitle,
++          onPointerDown: (event) => beginInteraction('resize', event),
++          style: {
++            position: 'absolute',
++            right: 0,
++            bottom: 0,
++            width: '22px',
++            height: '22px',
++            zIndex: 2,
++            cursor: maximized ? 'default' : 'nwse-resize',
++            touchAction: 'none',
++            background: maximized
++              ? 'transparent'
++              : 'linear-gradient(135deg, transparent 52%, var(--dsw-alias-border-l2) 53%, var(--dsw-alias-border-l2) 62%, transparent 63%, transparent 72%, var(--dsw-alias-border-l2) 73%, var(--dsw-alias-border-l2) 82%, transparent 83%)'
++          }
++        })
++      )
++    }
++
++    function headerButtonStyle() {
++      return {
++        height: '30px',
++        padding: '0 10px',
++        border: '1px solid var(--dsw-alias-border-l2)',
++        borderRadius: '8px',
++        background: 'var(--dsw-alias-button-elevated-fill)',
++        color: 'var(--dsw-alias-label-primary)',
++        cursor: 'pointer'
++      }
++    }
++
++    const inject = ['slots']
++
++    function apply(ctx) {
++      ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
++        name: 'sidebar.footer.action',
++        id: 'browser-desktop',
++        order: 50,
++        label: messages.browser
++      }, BrowserButton))
++
++      ctx.slots.inject('shell.overlay', () => ctx.slots.register({
++        name: 'shell.overlay',
++        id: 'browser-desktop-overlay',
++        order: 50,
++        label: messages.browserDialog
++      }, BrowserOverlay))
++    }
++
++    module.exports.apply = apply
++    module.exports.inject = inject
++    return module.exports
++  }
++})
+diff --git a/deepseek-harness/plugins/dsh-browser-desktop/cordis.patch.yml b/deepseek-harness/plugins/dsh-browser-desktop/cordis.patch.yml
+new file mode 100644
+index 0000000..b30d2b4
+--- /dev/null
++++ b/deepseek-harness/plugins/dsh-browser-desktop/cordis.patch.yml
+@@ -0,0 +1,5 @@
++# Bundle patch used by `dsh plugin add`; this image instead loads the plugin
++# through the --patch overlay that the entrypoint passes to `dsh web`.
++- insert:
++    - id: browser-desktop
++      name: '@1panel/dsh-browser-desktop'
+diff --git a/deepseek-harness/plugins/dsh-browser-desktop/index.js b/deepseek-harness/plugins/dsh-browser-desktop/index.js
+new file mode 100644
+index 0000000..ee33c18
+--- /dev/null
++++ b/deepseek-harness/plugins/dsh-browser-desktop/index.js
+@@ -0,0 +1,275 @@
++// Visible Chromium desktop for DeepSeek Harness: model bridge + same-origin
++// noVNC panel.
++//
++// This is the 1Panel adaptation of `@runzhliu/dsh-browser-desktop` (MIT, see
++// LICENSE). Upstream expects noVNC on a second published port and rewrites the
++// browser URL's port; this image publishes exactly one port, so the viewer is
++// mounted under a same-origin path on the Harness web server and the RFB
++// socket is bridged to x11vnc in-process. See docs/adr/0001 for the reasoning.
++import { existsSync } from 'node:fs'
++
++import z from '@deepseek-ai/schemastery'
++
++import {
++  isPort,
++  normalizeBasePath,
++  normalizePagePath,
++  normalizeSocketPath,
++  viewerPath,
++} from './paths.js'
++import { isSameOriginRequest } from './origin.js'
++import { createStaticHandler } from './static.js'
++import { acceptUpgrade, bridgeToTcp } from './ws-bridge.js'
++
++export { viewerPath }
++
++export const name = 'browser-desktop'
++export const inject = ['tools', 'systemPrompt', 'webServer']
++
++const defaultDesktopPath = '/vnc.html?autoconnect=1&resize=scale&view_only=0&reconnect=1'
++
++export const Config = z.object({
++  cdpBaseUrl: z.string().min(1).default('http://127.0.0.1:9222'),
++  desktopBasePath: z.string().min(1).default('/desktop'),
++  desktopPath: z.string().min(1).default(defaultDesktopPath),
++  wsPath: z.string().default(''),
++  novncRoot: z.string().min(1).default('/usr/share/novnc'),
++  vncHost: z.string().min(1).default('127.0.0.1'),
++  vncPort: z.number().step(1).min(1).max(65535).default(5900),
++  pingIntervalMs: z.number().step(1).min(1000).max(600000).default(30000),
++  pollIntervalMs: z.number().step(1).min(250).max(10000).default(750),
++})
++
++function normalizeBaseUrl(input) {
++  const parsed = new URL(input)
++  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
++    throw new Error('cdpBaseUrl must use http:// or https://')
++  }
++  return parsed.toString().replace(/\/$/, '')
++}
++
++function normalizeUrl(input) {
++  const value = input.trim()
++  if (value.length === 0) throw new Error('url must be a non-empty string')
++
++  const parsed = new URL(value.includes('://') ? value : `https://${value}`)
++  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
++    throw new Error('only http:// and https:// URLs can be opened')
++  }
++  return parsed.toString()
++}
++
++
++function sendJson(res, status, value) {
++  const body = JSON.stringify(value)
++  res.writeHead(status, {
++    'content-type': 'application/json; charset=utf-8',
++    'cache-control': 'no-store',
++    'content-length': Buffer.byteLength(body),
++  })
++  res.end(body)
++}
++
++async function readJson(req) {
++  let body = ''
++  for await (const chunk of req) {
++    body += chunk
++    if (body.length > 16384) throw new Error('request body is too large')
++  }
++  if (body.length === 0) throw new Error('request body is required')
++  return JSON.parse(body)
++}
++
++export function apply(ctx, config = {}) {
++  const cdpBase = normalizeBaseUrl(config.cdpBaseUrl ?? 'http://127.0.0.1:9222')
++  const basePath = normalizeBasePath(config.desktopBasePath)
++  const socketPath = normalizeSocketPath(config.wsPath, basePath)
++  const pagePath = viewerPath(normalizePagePath(config.desktopPath, defaultDesktopPath), socketPath, basePath)
++  const novncRoot = config.novncRoot ?? '/usr/share/novnc'
++  const vncPort = isPort(config.vncPort) ? config.vncPort : 5900
++  const pollIntervalMs = config.pollIntervalMs ?? 750
++  const pingIntervalMs = config.pingIntervalMs ?? 30_000
++
++  const log = (level, message) => {
++    const logger = ctx.logger
++    const write = logger?.[level]
++    if (typeof write === 'function') write.call(logger, `browser-desktop: ${message}`)
++  }
++
++  let state = {
++    revision: 0,
++    url: null,
++    openedAt: 0,
++  }
++
++  async function cdpFetch(path, init, signal) {
++    let lastError
++    for (let attempt = 0; attempt < 20; attempt += 1) {
++      try {
++        const response = await fetch(`${cdpBase}${path}`, { ...init, signal })
++        if (!response.ok) throw new Error(`Chromium DevTools returned HTTP ${response.status}`)
++        return response
++      } catch (error) {
++        lastError = error
++        if (signal?.aborted) throw error
++        await new Promise((resolve) => setTimeout(resolve, 250))
++      }
++    }
++    throw lastError
++  }
++
++  async function openUrl(input, signal) {
++    const url = normalizeUrl(input)
++    const response = await cdpFetch(`/json/new?${encodeURIComponent(url)}`, { method: 'PUT' }, signal)
++    const target = await response.json()
++    await cdpFetch(`/json/activate/${encodeURIComponent(target.id)}`, {}, signal)
++    state = {
++      revision: state.revision + 1,
++      url,
++      openedAt: Date.now(),
++    }
++    return { url, status: 'opened' }
++  }
++
++  ctx.systemPrompt.section({
++    name: 'tool:browser_open',
++    order: 115,
++    text: 'Use browser_open only when the user asks to open, show, or hand off a URL in the visible browser desktop. It opens the persistent container Chromium and reveals it for human takeover. When Browser Use tools are available, use those tools for page inspection and interaction instead of treating browser_open as an automation tool. Do not investigate or reinstall the browser, x11vnc, noVNC, or the desktop bridge.',
++  })
++
++  ctx.tools.register({
++    name: 'browser_open',
++    description: 'Open an HTTP or HTTPS URL in the visible persistent Chromium desktop and reveal it for human takeover. Use Browser Use tools for page inspection and interaction.',
++    parameters: {
++      type: 'object',
++      additionalProperties: false,
++      properties: {
++        url: {
++          type: 'string',
++          description: 'The URL to open. A missing scheme defaults to https://.',
++        },
++      },
++      required: ['url'],
++    },
++    output: {
++      schema: {
++        type: 'object',
++        additionalProperties: false,
++        properties: {
++          url: { type: 'string' },
++          status: { type: 'string' },
++        },
++        required: ['url', 'status'],
++      },
++      render: (_args, value) => [{
++        type: 'text',
++        text: `Opened ${value.url} in the embedded browser.`,
++      }],
++    },
++    async execute(args, exec) {
++      if (typeof args?.url !== 'string') throw new Error('url must be a string')
++      return openUrl(args.url, exec.signal)
++    },
++  })
++
++  ctx.effect(() => {
++    const disposers = []
++    const bridges = new Set()
++
++    disposers.push(ctx.webServer.register({
++      kind: 'exact',
++      path: '/browser-desktop/state',
++      handler(req, res) {
++        if (req.method !== 'GET' && req.method !== 'HEAD') {
++          res.writeHead(405)
++          res.end()
++          return
++        }
++        if (req.method === 'HEAD') {
++          res.writeHead(200, { 'cache-control': 'no-store' })
++          res.end()
++          return
++        }
++        sendJson(res, 200, {
++          ...state,
++          desktop: { path: pagePath, socketPath },
++          pollIntervalMs,
++        })
++      },
++    }))
++
++    disposers.push(ctx.webServer.register({
++      kind: 'exact',
++      path: '/browser-desktop/open',
++      async handler(req, res) {
++        if (req.method !== 'POST') {
++          res.writeHead(405)
++          res.end()
++          return
++        }
++        if (!isSameOriginRequest(req)) {
++          sendJson(res, 403, { error: 'cross-origin requests are not allowed' })
++          return
++        }
++        try {
++          const input = await readJson(req)
++          if (typeof input?.url !== 'string') throw new Error('url must be a string')
++          sendJson(res, 200, await openUrl(input.url))
++        } catch (error) {
++          sendJson(res, 400, {
++            error: error instanceof Error ? error.message : 'unable to open URL',
++          })
++        }
++      },
++    }))
++
++    if (!existsSync(novncRoot)) {
++      // A build without the desktop layer still loads the plugin so that the
++      // tool and the panel keep their documented behavior; only the viewer is
++      // missing, and the 404 that follows says so.
++      log('warn', `noVNC assets are missing at ${novncRoot}; the desktop viewer will not be served`)
++    } else {
++      disposers.push(ctx.webServer.register({
++        kind: 'prefix',
++        path: basePath,
++        handler: createStaticHandler({
++          root: novncRoot,
++          basePath,
++          entryPath: pagePath,
++          logger: (message) => log('info', message),
++        }),
++      }))
++      disposers.push(ctx.webServer.registerUpgrade({
++        path: socketPath,
++        handler(request, socket, head) {
++          // Cross-site WebSocket hijacking: a foreign page must not be able to
++          // open the RFB stream with the browser's ambient credentials. Browsers
++          // always send Origin on a WebSocket handshake, so require it here.
++          if (!isSameOriginRequest(request, { require: true })) {
++            log('warn', 'rejected a cross-origin WebSocket upgrade')
++            socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')
++            return
++          }
++          if (!acceptUpgrade(request, socket, (message) => log('warn', message))) return
++          const bridge = bridgeToTcp({
++            socket,
++            head,
++            host: config.vncHost ?? '127.0.0.1',
++            port: vncPort,
++            pingIntervalMs,
++            logger: (message) => log('info', message),
++          })
++          bridges.add(bridge)
++          socket.once('close', () => bridges.delete(bridge))
++        },
++      }))
++      log('info', `desktop viewer at ${pagePath} (RFB ${config.vncHost ?? '127.0.0.1'}:${vncPort} via ${socketPath})`)
++    }
++
++    return () => {
++      for (const bridge of bridges) bridge.close()
++      bridges.clear()
++      for (const dispose of disposers.reverse()) dispose()
++    }
++  }, 'browser-desktop: HTTP and WebSocket routes')
++}
+diff --git a/deepseek-harness/plugins/dsh-browser-desktop/origin.js b/deepseek-harness/plugins/dsh-browser-desktop/origin.js
+new file mode 100644
+index 0000000..72888c3
+--- /dev/null
++++ b/deepseek-harness/plugins/dsh-browser-desktop/origin.js
+@@ -0,0 +1,67 @@
++// Same-origin policy for the desktop routes.
++//
++// The desktop socket is the one place where this image hands out ambient
++// authority: whoever reaches it drives a real browser with the container's
++// cookies, files and network. DSH's own `/api` upgrade is fenced by Host +
++// Origin; the desktop route must be fenced the same way, or any page the user
++// visits could open `wss://<harness>/desktop/websockify` and take the desktop
++// over (cross-site WebSocket hijacking).
++//
++// Only host and port are compared. The scheme cannot be derived inside the
++// container: TLS terminates in front of it and the forwarding proxy
++// deliberately strips `X-Forwarded-Proto` so a client cannot forge it.
++
++/**
++ * Lowercase an authority, drop a trailing FQDN dot and the default ports.
++ * @param {string} authority `host`, `host:port`, or a bracketed IPv6 literal
++ */
++export function normalizeAuthority(authority) {
++  const text = String(authority ?? '').trim().toLowerCase()
++  if (text === '') return ''
++
++  let host = text
++  let port = ''
++  if (text.startsWith('[')) {
++    const end = text.indexOf(']')
++    if (end === -1) return text
++    host = text.slice(0, end + 1)
++    const rest = text.slice(end + 1)
++    if (rest.startsWith(':')) port = rest.slice(1)
++    else if (rest !== '') return text
++  } else {
++    const colon = text.lastIndexOf(':')
++    if (colon !== -1 && /^\d+$/.test(text.slice(colon + 1))) {
++      host = text.slice(0, colon)
++      port = text.slice(colon + 1)
++    }
++  }
++  // The FQDN trailing dot belongs to the host part, not to the authority text.
++  if (host.endsWith('.')) host = host.slice(0, -1)
++  if (port === '' || port === '80' || port === '443') return host
++  return `${host}:${port}`
++}
++
++/**
++ * Whether a request's Origin names the same authority as its Host header.
++ *
++ * @param {import('node:http').IncomingMessage} request
++ * @param {object} [options]
++ * @param {boolean} [options.require] reject a request without an Origin header.
++ *   Browsers always send Origin on a WebSocket handshake, so the upgrade route
++ *   requires it; a non-browser POST client has no ambient credentials to abuse
++ *   and may omit it.
++ * @returns {boolean}
++ */
++export function isSameOriginRequest(request, { require = false } = {}) {
++  const origin = request.headers.origin
++  if (typeof origin !== 'string' || origin.trim() === '') return !require
++  let url
++  try {
++    url = new URL(origin.trim())
++  } catch {
++    return false
++  }
++  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
++  const host = normalizeAuthority(request.headers.host)
++  return host !== '' && normalizeAuthority(url.host) === host
++}
+diff --git a/deepseek-harness/plugins/dsh-browser-desktop/package.json b/deepseek-harness/plugins/dsh-browser-desktop/package.json
+new file mode 100644
+index 0000000..d8d31d2
+--- /dev/null
++++ b/deepseek-harness/plugins/dsh-browser-desktop/package.json
+@@ -0,0 +1,62 @@
++{
++  "name": "@1panel/dsh-browser-desktop",
++  "version": "0.1.6-1panel.2",
++  "description": "Same-origin Chromium desktop and human-takeover panel for DeepSeek Harness, adapted for the 1Panel plain-HTTP image.",
++  "license": "MIT",
++  "type": "module",
++  "main": "./index.js",
++  "files": [
++    "client.js",
++    "cordis.patch.yml",
++    "index.js",
++    "origin.js",
++    "paths.js",
++    "static.js",
++    "ws-bridge.js",
++    "LICENSE",
++    "README.md"
++  ],
++  "exports": {
++    ".": "./index.js",
++    "./client": "./client.js",
++    "./cordis.patch.yml": "./cordis.patch.yml",
++    "./package.json": "./package.json"
++  },
++  "dsh": {
++    "bundle": {
++      "patch": "./cordis.patch.yml"
++    },
++    "client": {
++      "platform": "web",
++      "inject": [
++        "@deepseek-ai/dsh-client-modules",
++        "@deepseek-ai/dsh-client-ui-layout",
++        "@deepseek-ai/dsh-client-ui-sidebar"
++      ]
++    }
++  },
++  "repository": {
++    "type": "git",
++    "url": "git+https://github.com/1Panel-dev/runtime.git",
++    "directory": "deepseek-harness/plugins/dsh-browser-desktop"
++  },
++  "keywords": [
++    "dsh-plugin",
++    "novnc",
++    "chromium",
++    "vnc",
++    "human-in-the-loop"
++  ],
++  "engines": {
++    "node": ">=22.19"
++  },
++  "dependencies": {
++    "@deepseek-ai/schemastery": "^3.18.1"
++  },
++  "peerDependencies": {
++    "@deepseek-ai/dsh-client-modules": "^0.1.2-alpha.3 || ^0.2.0-rc.1 || ^0.2.1-alpha.1 || ^0.2.2-alpha.2",
++    "@deepseek-ai/dsh-client-ui-layout": "^0.1.2-alpha.3 || ^0.2.0-rc.1 || ^0.2.1-alpha.1 || ^0.2.2-alpha.2",
++    "@deepseek-ai/dsh-client-ui-sidebar": "^0.1.2-alpha.3 || ^0.2.0-rc.1 || ^0.2.1-alpha.1 || ^0.2.2-alpha.2",
++    "react": "^18.2.0"
++  }
++}
+diff --git a/deepseek-harness/plugins/dsh-browser-desktop/paths.js b/deepseek-harness/plugins/dsh-browser-desktop/paths.js
+new file mode 100644
+index 0000000..1d46bd1
+--- /dev/null
++++ b/deepseek-harness/plugins/dsh-browser-desktop/paths.js
+@@ -0,0 +1,81 @@
++// Geometry helpers for the desktop plugin.
++//
++// Everything here is pure (no I/O, no DSH imports) so the container build test
++// can exercise it without a mounted plugin graph. The desktop is served from a
++// same-origin path on the DSH listener, never from a second port, so every URL
++// this module returns is a path on the current origin.
++
++/** Absolute pathname without a trailing slash, no dot segments. */
++export function normalizeBasePath(input, fallback = '/desktop') {
++  const value = typeof input === 'string' && input.trim() !== '' ? input.trim() : fallback
++  const url = new URL(value, 'http://desktop.invalid')
++  const path = url.pathname.replace(/\/+$/, '')
++  if (path === '') throw new Error('desktopBasePath must not be the origin root')
++  if (url.search !== '' || url.hash !== '') {
++    throw new Error('desktopBasePath must be a path without query or fragment')
++  }
++  return path
++}
++
++/** Same-origin absolute page path; rejects any other origin. */
++export function normalizePagePath(input, fallback) {
++  const value = typeof input === 'string' && input.trim() !== '' ? input.trim() : fallback
++  const url = new URL(value, 'http://desktop.invalid')
++  if (url.origin !== 'http://desktop.invalid') {
++    throw new Error('desktopPath must be a same-origin absolute path')
++  }
++  return `${url.pathname}${url.search}${url.hash}`
++}
++
++/**
++ * WebSocket path for the RFB bridge. noVNC resolves its default relative
++ * `path` against the page URL, but the sidebar can also open the panel from
++ * another route, so the bridge path is passed explicitly and must stay
++ * same-origin.
++ */
++export function normalizeSocketPath(input, basePath, fallbackName = 'websockify') {
++  const value = typeof input === 'string' && input.trim() !== '' ? input.trim() : `${basePath}/${fallbackName}`
++  const url = new URL(value, 'http://desktop.invalid')
++  if (url.origin !== 'http://desktop.invalid') {
++    throw new Error('wsPath must be a same-origin absolute path')
++  }
++  if (!url.pathname.startsWith(`${basePath}/`)) {
++    throw new Error(`wsPath must live under ${basePath}`)
++  }
++  if (url.search !== '' || url.hash !== '') {
++    throw new Error('wsPath must not carry a query or fragment')
++  }
++  return url.pathname
++}
++
++/**
++ * Value passed to noVNC's `path` query parameter. noVNC 1.6 resolves it with
++ * `new URL(path, location.href)`, so an absolute path is stable no matter how
++ * deep the viewer page sits; a bare `websockify` would only work while the
++ * viewer stays a direct child of the desktop prefix.
++ */
++export function socketPathParameter(socketPath, basePath) {
++  const prefix = `${basePath}/`
++  if (!socketPath.startsWith(prefix)) throw new Error(`socket path must live under ${basePath}`)
++  return socketPath
++}
++
++export function isPort(value) {
++  return Number.isInteger(value) && value >= 1 && value <= 65535
++}
++
++/**
++ * The viewer URL the panel embeds. `pagePath` is relative to the desktop mount
++ * point (upstream's `desktopPath` convention), and the RFB path is pinned
++ * explicitly so the socket always lands on the route the plugin registered,
++ * even when the page is opened by hand or bookmarked with other parameters.
++ */
++export function viewerPath(pagePath, socketPath, basePath) {
++  const relative = normalizePagePath(pagePath, '/vnc.html')
++  const joined = new URL(`${basePath}${relative}`, 'http://desktop.invalid')
++  if (!joined.pathname.startsWith(`${basePath}/`) || joined.pathname === `${basePath}/`) {
++    throw new Error(`desktopPath must name a page below ${basePath}`)
++  }
++  joined.searchParams.set('path', socketPathParameter(socketPath, basePath))
++  return `${joined.pathname}${joined.search}${joined.hash}`
++}
+diff --git a/deepseek-harness/plugins/dsh-browser-desktop/static.js b/deepseek-harness/plugins/dsh-browser-desktop/static.js
+new file mode 100644
+index 0000000..846ff2d
+--- /dev/null
++++ b/deepseek-harness/plugins/dsh-browser-desktop/static.js
+@@ -0,0 +1,179 @@
++// Static assets for the embedded noVNC client.
++//
++// The desktop lives under a path on the DSH origin instead of a port of its
++// own, so the assets are served by the Harness web server that already sits
++// behind the authenticating reverse proxy. Only files below `root` are
++// reachable: the resolved real path is checked against the resolved root, which
++// also covers symlinks inside the noVNC tree.
++import { createReadStream } from 'node:fs'
++import { realpath, stat } from 'node:fs/promises'
++import path from 'node:path'
++
++const CONTENT_TYPES = new Map([
++  ['.html', 'text/html; charset=utf-8'],
++  ['.js', 'text/javascript; charset=utf-8'],
++  ['.mjs', 'text/javascript; charset=utf-8'],
++  ['.css', 'text/css; charset=utf-8'],
++  ['.json', 'application/json; charset=utf-8'],
++  ['.webmanifest', 'application/manifest+json; charset=utf-8'],
++  ['.svg', 'image/svg+xml'],
++  ['.png', 'image/png'],
++  ['.jpg', 'image/jpeg'],
++  ['.jpeg', 'image/jpeg'],
++  ['.gif', 'image/gif'],
++  ['.ico', 'image/x-icon'],
++  ['.woff', 'font/woff'],
++  ['.woff2', 'font/woff2'],
++  ['.ttf', 'font/ttf'],
++  ['.txt', 'text/plain; charset=utf-8'],
++  ['.map', 'application/json; charset=utf-8'],
++  ['.wasm', 'application/wasm'],
++  // noVNC's bell; a wrong type under nosniff can silence it.
++  ['.mp3', 'audio/mpeg'],
++  ['.oga', 'audio/ogg'],
++  ['.ogg', 'audio/ogg'],
++  ['.wav', 'audio/wav'],
++])
++
++export function contentType(file) {
++  return CONTENT_TYPES.get(path.extname(file).toLowerCase()) ?? 'application/octet-stream'
++}
++
++/** Weak validator: no weak comparison needed beyond exact string match. */
++export function entityTag(stats) {
++  return `W/"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}"`
++}
++
++function isFresh(request, stats, etag) {
++  const noneMatch = request.headers['if-none-match']
++  if (typeof noneMatch === 'string') {
++    const candidates = noneMatch.split(',').map((value) => value.trim())
++    if (candidates.includes('*') || candidates.includes(etag)) return true
++  }
++  const since = request.headers['if-modified-since']
++  if (typeof since === 'string') {
++    const stamp = Date.parse(since)
++    if (!Number.isNaN(stamp) && Math.floor(stats.mtimeMs / 1000) * 1000 <= stamp) return true
++  }
++  return false
++}
++
++function send(response, status, headers, body) {
++  response.writeHead(status, {
++    'x-content-type-options': 'nosniff',
++    'referrer-policy': 'same-origin',
++    ...headers,
++  })
++  response.end(body)
++}
++
++/**
++ * Resolve one request path to a regular file below `root`, or `null`.
++ * @param {string} root real-path checked base directory
++ * @param {string} relative path below the base, already URL-decoded
++ */
++export async function resolveAsset(root, relative, knownRealRoot) {
++  if (relative.includes('\0')) return null
++  const resolved = path.resolve(root, relative)
++  const realRoot = knownRealRoot ?? (await realpath(root))
++  const real = await realpath(resolved).catch(() => null)
++  if (real === null) return null
++  if (real !== realRoot && !real.startsWith(`${realRoot}${path.sep}`)) return null
++  const stats = await stat(real).catch(() => null)
++  if (stats === null || !stats.isFile()) return null
++  return { file: real, stats }
++}
++
++/**
++ * Build the request handler for the desktop prefix.
++ * @param {object} options
++ * @param {string} options.root absolute noVNC asset root
++ * @param {string} options.basePath absolute mount path without a trailing slash
++ * @param {string} [options.entryPath] same-origin viewer URL (`/desktop` redirects here)
++ * @param {(message: string) => void} [options.logger]
++ * @returns {(request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<void>}
++ */
++export function createStaticHandler({ root, basePath, entryPath = `${basePath}/vnc.html`, logger = () => {} }) {
++  const rootPath = path.resolve(root)
++  let realRoot
++  return async function handleDesktopAsset(request, response) {
++    if (request.method !== 'GET' && request.method !== 'HEAD') {
++      send(response, 405, { allow: 'GET, HEAD', 'content-type': 'text/plain' }, 'method not allowed\n')
++      return
++    }
++    let pathname
++    try {
++      const url = new URL(request.url ?? '/', 'http://desktop.invalid')
++      pathname = decodeURIComponent(url.pathname)
++    } catch {
++      send(response, 400, { 'content-type': 'text/plain' }, 'bad request\n')
++      return
++    }
++    if (pathname === basePath || pathname === `${basePath}/`) {
++      // `/desktop` alone is a directory, not a client: send the configured
++      // viewer, so `autoconnect` and the pinned socket path survive.
++      response.writeHead(302, { location: entryPath, 'cache-control': 'no-store' })
++      response.end()
++      return
++    }
++    if (!pathname.startsWith(`${basePath}/`)) {
++      send(response, 404, { 'content-type': 'text/plain' }, 'not found\n')
++      return
++    }
++
++    realRoot ??= await realpath(rootPath).catch(() => null)
++    const asset = realRoot === null
++      ? null
++      : await resolveAsset(rootPath, pathname.slice(basePath.length + 1), realRoot)
++    if (asset === null) {
++      logger(`desktop asset not found: ${pathname.slice(basePath.length)}`)
++      send(response, 404, { 'content-type': 'text/plain' }, 'not found\n')
++      return
++    }
++
++    const etag = entityTag(asset.stats)
++    if (isFresh(request, asset.stats, etag)) {
++      response.writeHead(304, {
++        etag,
++        'cache-control': 'no-cache',
++        'x-content-type-options': 'nosniff',
++        'referrer-policy': 'same-origin',
++      })
++      response.end()
++      return
++    }
++
++    const type = contentType(asset.file)
++    const headers = {
++      'content-type': type,
++      'content-length': String(asset.stats.size),
++      'last-modified': asset.stats.mtime.toUTCString(),
++      etag,
++      // Revalidate on every load: a container upgrade must not mix a cached
++      // rfb.js with a newer app/ui.js from the same prefix.
++      'cache-control': 'no-cache',
++      'x-content-type-options': 'nosniff',
++      'referrer-policy': 'same-origin',
++    }
++    if (type.startsWith('text/html')) {
++      // The viewer is meant to be framed by the Harness UI on this origin and
++      // by nothing else: framing it elsewhere enables clickjacking, and a
++      // framed viewer that autoconnects is a live desktop.
++      headers['content-security-policy'] = "frame-ancestors 'self'"
++      headers['x-frame-options'] = 'SAMEORIGIN'
++    }
++    if (request.method === 'HEAD') {
++      response.writeHead(200, headers)
++      response.end()
++      return
++    }
++    response.writeHead(200, headers)
++    const stream = createReadStream(asset.file)
++    stream.on('error', (error) => {
++      logger(`desktop asset read failed: ${error.message}`)
++      response.destroy()
++    })
++    response.on('close', () => stream.destroy())
++    stream.pipe(response)
++  }
++}
+diff --git a/deepseek-harness/plugins/dsh-browser-desktop/ws-bridge.js b/deepseek-harness/plugins/dsh-browser-desktop/ws-bridge.js
+new file mode 100644
+index 0000000..eda061f
+--- /dev/null
++++ b/deepseek-harness/plugins/dsh-browser-desktop/ws-bridge.js
+@@ -0,0 +1,359 @@
++// WebSocket <-> TCP bridge and WebSocket frame codec for the VNC desktop.
++//
++// The desktop has no TCP port of its own on any interface a browser can use:
++// this module speaks the WebSocket server side on the path DSH already exposes
++// and pipes the decoded RFB bytes to x11vnc on loopback. That keeps the desktop
++// behind the same origin, the same TLS terminator, the same authenticating
++// proxy and the same Host allowlist as the rest of the UI, instead of adding a
++// second port (or host) that would need its own policy.
++//
++// Only what noVNC needs is implemented: server-side upgrade, binary messages,
++// fragmentation, ping/pong, close handshake and backpressure. No extension is
++// negotiated, so permessage-deflate never enters the picture.
++import crypto from 'node:crypto'
++import net from 'node:net'
++
++const WEBSOCKET_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
++
++export const MAX_MESSAGE_BYTES = 16 * 1024 * 1024
++
++export const OPCODE = Object.freeze({
++  continuation: 0x0,
++  text: 0x1,
++  binary: 0x2,
++  close: 0x8,
++  ping: 0x9,
++  pong: 0xa,
++})
++
++/** RFC 6455 §4.2.2 accept token for a client Sec-WebSocket-Key. */
++export function acceptKey(key) {
++  return crypto.createHash('sha1').update(`${key}${WEBSOCKET_GUID}`).digest('base64')
++}
++
++function encodeLength(length) {
++  if (length < 126) return Buffer.from([length])
++  if (length < 65536) {
++    const header = Buffer.alloc(3)
++    header[0] = 126
++    header.writeUInt16BE(length, 1)
++    return header
++  }
++  const header = Buffer.alloc(9)
++  header[0] = 127
++  header.writeBigUInt64BE(BigInt(length), 1)
++  return header
++}
++
++/** One unmasked server-to-client frame. */
++export function encodeFrame(opcode, payload = Buffer.alloc(0)) {
++  return Buffer.concat([Buffer.from([0x80 | opcode]), encodeLength(payload.length), payload])
++}
++
++export function encodeClose(code, reason = '') {
++  const text = Buffer.from(reason, 'utf8').subarray(0, 123)
++  const payload = Buffer.alloc(2 + text.length)
++  payload.writeUInt16BE(code, 0)
++  text.copy(payload, 2)
++  return encodeFrame(OPCODE.close, payload)
++}
++
++/** Codes a closing endpoint may echo back (RFC 6455 §7.4). */
++export function replyCloseCode(code) {
++  if (!Number.isInteger(code) || code < 1000 || code > 4999) return 1000
++  if ([1004, 1005, 1006, 1015].includes(code)) return 1000
++  return code
++}
++
++export function maskPayload(payload, key) {
++  for (let index = 0; index < payload.length; index += 1) payload[index] ^= key[index & 3]
++  return payload
++}
++
++/**
++ * Incremental parser for client-to-server frames. The browser must mask every
++ * frame; anything else is a protocol error (RFC 6455 §5.1) and the caller sends
++ * a close frame instead of guessing.
++ */
++export class FrameParser {
++  #pending = Buffer.alloc(0)
++  #fragments = null
++  #fragmentBytes = 0
++  #dead = false
++
++  constructor({ onMessage, onPing = () => {}, onPong = () => {}, onClose = () => {}, onError = () => {} }) {
++    this.onMessage = onMessage
++    this.onPing = onPing
++    this.onPong = onPong
++    this.onClose = onClose
++    this.onError = onError
++  }
++
++  get dead() {
++    return this.#dead
++  }
++
++  push(chunk) {
++    if (this.#dead || chunk.length === 0) return
++    this.#pending = this.#pending.length === 0 ? chunk : Buffer.concat([this.#pending, chunk])
++    while (!this.#dead && this.#parseOne()) { /* keep consuming */ }
++  }
++
++  #fail(code, reason) {
++    this.#dead = true
++    this.#pending = Buffer.alloc(0)
++    this.#fragments = null
++    this.onError(code, reason)
++    return false
++  }
++
++  #parseOne() {
++    const buffer = this.#pending
++    if (buffer.length < 2) return false
++
++    const fin = (buffer[0] & 0x80) !== 0
++    const opcode = buffer[0] & 0x0f
++    const control = (opcode & 0x08) !== 0
++    if ((buffer[0] & 0x70) !== 0) return this.#fail(1002, 'reserved bits must be zero')
++    if (!control && ![OPCODE.continuation, OPCODE.text, OPCODE.binary].includes(opcode)) {
++      return this.#fail(1002, 'unknown opcode')
++    }
++    if (control && ![OPCODE.close, OPCODE.ping, OPCODE.pong].includes(opcode)) {
++      return this.#fail(1002, 'unknown control opcode')
++    }
++    if ((buffer[1] & 0x80) === 0) return this.#fail(1002, 'client frames must be masked')
++
++    let length = buffer[1] & 0x7f
++    let offset = 2
++    if (length === 126) {
++      if (buffer.length < 4) return false
++      length = buffer.readUInt16BE(2)
++      offset = 4
++    } else if (length === 127) {
++      if (buffer.length < 10) return false
++      const wide = buffer.readBigUInt64BE(2)
++      if (wide > BigInt(MAX_MESSAGE_BYTES)) return this.#fail(1009, 'message too large')
++      length = Number(wide)
++      offset = 10
++    }
++    if (control && (length > 125 || !fin)) return this.#fail(1002, 'control frames must be final and short')
++    if (length > MAX_MESSAGE_BYTES) return this.#fail(1009, 'message too large')
++    if (buffer.length < offset + 4 + length) return false
++
++    const payload = maskPayload(Buffer.from(buffer.subarray(offset + 4, offset + 4 + length)), buffer.subarray(offset, offset + 4))
++    this.#pending = buffer.subarray(offset + 4 + length)
++    this.#dispatch(fin, opcode, payload)
++    return true
++  }
++
++  #dispatch(fin, opcode, payload) {
++    if (opcode === OPCODE.close) {
++      this.#dead = true
++      this.onClose(payload)
++      return
++    }
++    if (opcode === OPCODE.ping) {
++      this.onPing(payload)
++      return
++    }
++    if (opcode === OPCODE.pong) {
++      this.onPong(payload)
++      return
++    }
++    if (opcode === OPCODE.text) {
++      this.#fail(1003, 'text frames are not supported')
++      return
++    }
++    if (opcode === OPCODE.continuation) {
++      if (this.#fragments === null) {
++        this.#fail(1002, 'continuation without a started message')
++        return
++      }
++      this.#fragments.push(payload)
++      this.#fragmentBytes += payload.length
++      if (this.#fragmentBytes > MAX_MESSAGE_BYTES) {
++        this.#fail(1009, 'message too large')
++        return
++      }
++      if (fin) {
++        const message = Buffer.concat(this.#fragments)
++        this.#fragments = null
++        this.#fragmentBytes = 0
++        this.onMessage(message)
++      }
++      return
++    }
++    // binary
++    if (fin) {
++      this.onMessage(payload)
++      return
++    }
++    this.#fragments = [payload]
++    this.#fragmentBytes = payload.length
++  }
++}
++
++/**
++ * Validate an HTTP upgrade and answer it with 101. Returns false when the
++ * request is not an acceptable WebSocket handshake, after answering 400.
++ */
++export function acceptUpgrade(request, socket, logger = () => {}) {
++  const key = request.headers['sec-websocket-key']
++  const version = request.headers['sec-websocket-version']
++  const protocols = String(request.headers['sec-websocket-protocol'] ?? '')
++    .split(',')
++    .map((value) => value.trim())
++    .filter(Boolean)
++  if (request.headers.upgrade?.toLowerCase() !== 'websocket' || typeof key !== 'string' || key.trim() === '') {
++    logger('rejected an upgrade without a WebSocket handshake')
++    socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
++    return false
++  }
++  if (version !== undefined && String(version).trim() !== '13') {
++    logger(`rejected WebSocket version ${String(version)}`)
++    socket.end('HTTP/1.1 426 Upgrade Required\r\nSec-WebSocket-Version: 13\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
++    return false
++  }
++  // noVNC sends no subprotocol by default; a client that demands one may only
++  // get "binary" here, because base64 framing is not implemented.
++  if (protocols.length > 0 && !protocols.includes('binary')) {
++    logger(`rejected subprotocol ${protocols.join(',')}`)
++    socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
++    return false
++  }
++  const lines = [
++    'HTTP/1.1 101 Switching Protocols',
++    'Upgrade: websocket',
++    'Connection: Upgrade',
++    `Sec-WebSocket-Accept: ${acceptKey(key.trim())}`,
++  ]
++  if (protocols.includes('binary')) lines.push('Sec-WebSocket-Protocol: binary')
++  socket.write(`${lines.join('\r\n')}\r\n\r\n`)
++  return true
++}
++
++/**
++ * Pipe one accepted WebSocket connection to a loopback TCP service.
++ *
++ * @param {object} options
++ * @param {import('node:net').Socket} options.socket upgraded socket owned here
++ * @param {Buffer} [options.head] bytes the HTTP parser already consumed
++ * @param {string} [options.host] loopback target address
++ * @param {number} options.port loopback target port
++ * @param {number} [options.pingIntervalMs] keep-alive ping interval
++ * @param {(message: string) => void} [options.logger]
++ * @param {typeof net.connect} [options.connect] injectable for tests
++ * @returns {{ close: () => void, stats: () => { up: number, down: number, connected: boolean } }}
++ */
++export function bridgeToTcp({
++  socket,
++  head,
++  host = '127.0.0.1',
++  port,
++  pingIntervalMs = 30_000,
++  logger = () => {},
++  connect = net.connect,
++}) {
++  let closed = false
++  let up = 0
++  let down = 0
++  let connected = false
++  let socketEnded = false
++  let timer
++
++  const tcp = connect({ host, port })
++  tcp.setNoDelay(true)
++  socket.setNoDelay?.(true)
++
++  const cleanup = () => {
++    if (closed) return
++    closed = true
++    clearInterval(timer)
++    tcp.destroy()
++    if (socketEnded) {
++      // Let a just-written close frame flush before the socket goes away.
++      if (typeof socket.destroySoon === 'function') socket.destroySoon()
++      else socket.destroy?.()
++      return
++    }
++    socket.destroy?.()
++  }
++
++  const endSocket = (code, reason) => {
++    if (socketEnded) return
++    socketEnded = true
++    try {
++      socket.end(encodeClose(code, reason))
++    } catch {
++      socket.destroy?.()
++    }
++  }
++
++  // Protocol errors are safe to echo (they describe the client's own frame);
++  // loopback transport errors are not, so the close reason stays generic and
++  // the detail only reaches the container log.
++  const fail = (code, detail, reason = detail) => {
++    logger(`closing the desktop stream: ${detail}`)
++    endSocket(code, reason)
++    cleanup()
++  }
++
++  const parser = new FrameParser({
++    onMessage: (payload) => {
++      up += payload.length
++      if (!tcp.write(payload)) socket.pause?.()
++    },
++    onPing: (payload) => { socket.write(encodeFrame(OPCODE.pong, payload)) },
++    onClose: (payload) => {
++      endSocket(replyCloseCode(payload.length >= 2 ? payload.readUInt16BE(0) : 1005))
++      cleanup()
++    },
++    onError: fail,
++  })
++
++  tcp.on('connect', () => {
++    connected = true
++    logger(`desktop stream attached to ${host}:${port}`)
++    if (head?.length) parser.push(head)
++  })
++  tcp.on('data', (chunk) => {
++    down += chunk.length
++    if (!socket.write(encodeFrame(OPCODE.binary, chunk))) tcp.pause()
++  })
++  tcp.on('drain', () => socket.resume?.())
++  tcp.on('error', (error) => {
++    fail(1011, `desktop unavailable: ${error.code ?? error.message}`, 'desktop unavailable')
++  })
++  tcp.on('close', () => {
++    if (closed) return
++    // The desktop closed first; tell the browser rather than letting the panel
++    // sit on a dead socket.
++    endSocket(1000, 'desktop closed')
++    cleanup()
++  })
++
++  // Anything the client sends before the loopback connect completes is queued
++  // on the TCP socket by Node, so the parser can start immediately.
++  socket.on('data', (chunk) => parser.push(chunk))
++  socket.on('drain', () => tcp.resume())
++  socket.on('error', () => cleanup())
++  socket.on('close', () => {
++    if (closed) return
++    closed = true
++    clearInterval(timer)
++    tcp.destroy()
++  })
++
++  timer = setInterval(() => {
++    if (socketEnded) return
++    // Traefik, Authentik's outpost and corporate load balancers all drop idle
++    // connections eventually; a ping keeps the RFB stream alive without data.
++    socket.write(encodeFrame(OPCODE.ping))
++  }, pingIntervalMs)
++  timer.unref?.()
++
++  return {
++    close: cleanup,
++    stats: () => ({ up, down, connected }),
++  }
++}
+diff --git a/deepseek-harness/test-desktop.mjs b/deepseek-harness/test-desktop.mjs
+new file mode 100644
+index 0000000..8d80af6
+--- /dev/null
++++ b/deepseek-harness/test-desktop.mjs
+@@ -0,0 +1,636 @@
++import assert from 'node:assert/strict'
++import { once } from 'node:events'
++import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
++import http from 'node:http'
++import net from 'node:net'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import test from 'node:test'
++
++const pluginRoot = process.env.DSH_DESKTOP_PLUGIN_ROOT ?? '/opt/deepseek-harness/plugins/dsh-browser-desktop'
++
++const paths = await import(join(pluginRoot, 'paths.js'))
++const { createStaticHandler, contentType, entityTag } = await import(join(pluginRoot, 'static.js'))
++const { FrameParser, acceptKey, acceptUpgrade, bridgeToTcp, encodeFrame, replyCloseCode } = await import(join(pluginRoot, 'ws-bridge.js'))
++const { isSameOriginRequest, normalizeAuthority } = await import(join(pluginRoot, 'origin.js'))
++
++// ---------------------------------------------------------------------------
++// Path geometry: every URL the panel embeds must stay on the Harness origin.
++// ---------------------------------------------------------------------------
++
++test('desktop paths stay absolute and same-origin', () => {
++  assert.equal(paths.normalizeBasePath('/desktop/'), '/desktop')
++  assert.equal(paths.normalizeBasePath(''), '/desktop')
++  assert.throws(() => paths.normalizeBasePath('/'))
++  assert.equal(paths.normalizePagePath('/vnc.html?autoconnect=1', '/vnc.html'), '/vnc.html?autoconnect=1')
++  assert.throws(() => paths.normalizePagePath('https://other.example/vnc.html', '/vnc.html'))
++  assert.throws(() => paths.normalizePagePath('//other.example/vnc.html', '/vnc.html'))
++  assert.equal(paths.normalizeSocketPath('', '/desktop'), '/desktop/websockify')
++  assert.throws(() => paths.normalizeSocketPath('/elsewhere/ws', '/desktop'))
++  assert.throws(() => paths.normalizeSocketPath('/desktop/ws?token=1', '/desktop'))
++})
++
++test('the viewer URL pins the WebSocket path on the page origin', () => {
++  const viewer = paths.viewerPath('/vnc.html?autoconnect=1&resize=scale', '/desktop/websockify', '/desktop')
++  const url = new URL(viewer, 'https://dsh.example.com')
++  assert.equal(url.origin, 'https://dsh.example.com')
++  assert.equal(url.pathname, '/desktop/vnc.html')
++  assert.equal(url.searchParams.get('path'), '/desktop/websockify')
++  assert.equal(url.searchParams.get('autoconnect'), '1')
++  // The mount point itself is not a page, and a protocol-relative URL is a
++  // different origin rather than a path.
++  assert.throws(() => paths.viewerPath('/', '/desktop/websockify', '/desktop'))
++  assert.throws(() => paths.viewerPath('//other.example/vnc.html', '/desktop/websockify', '/desktop'))
++})
++
++// ---------------------------------------------------------------------------
++// Static assets: no path escapes, no directory listings, cheap revalidation.
++// ---------------------------------------------------------------------------
++
++async function createAssetRoot() {
++  const base = await mkdtemp(join(tmpdir(), 'dsh-desktop-'))
++  const root = join(base, 'novnc')
++  await mkdir(join(root, 'app'), { recursive: true })
++  await writeFile(join(root, 'vnc.html'), '<!doctype html><title>noVNC</title>\n')
++  await writeFile(join(root, 'app', 'ui.js'), 'export default 1\n')
++  await writeFile(join(root, 'defaults.json'), '{}\n')
++  await writeFile(join(base, 'secret.txt'), 'do not serve\n')
++  await symlink(join(base, 'secret.txt'), join(root, 'escape.txt'))
++  return { base, root, cleanup: () => rm(base, { recursive: true, force: true }) }
++}
++
++function listen(server) {
++  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
++}
++
++async function startAssetServer(root, entryPath) {
++  const handler = createStaticHandler({ root, basePath: '/desktop', entryPath })
++  const server = http.createServer((request, response) => {
++    handler(request, response).catch((error) => {
++      response.writeHead(500)
++      response.end(String(error))
++    })
++  })
++  const port = await listen(server)
++  return { port, close: () => new Promise((resolve) => server.close(resolve)) }
++}
++
++function request(port, { method = 'GET', path = '/', headers = {} } = {}) {
++  headers = { connection: 'close', ...headers }
++  return new Promise((resolve, reject) => {
++    const call = http.request({ host: '127.0.0.1', port, method, path, headers, agent: false }, (response) => {
++      let body = ''
++      response.on('data', (chunk) => { body += chunk })
++      response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body }))
++    })
++    call.on('error', reject)
++    call.end()
++  })
++}
++
++test('the desktop serves the noVNC viewer and its assets', async (t) => {
++  const assets = await createAssetRoot()
++  const server = await startAssetServer(assets.root)
++  t.after(async () => { await server.close(); await assets.cleanup() })
++
++  const viewer = await request(server.port, { path: '/desktop/vnc.html' })
++  assert.equal(viewer.status, 200)
++  assert.match(viewer.headers['content-type'], /^text\/html/)
++  assert.equal(viewer.headers['x-content-type-options'], 'nosniff')
++  // The viewer may only be framed by this origin.
++  assert.equal(viewer.headers['x-frame-options'], 'SAMEORIGIN')
++  assert.match(viewer.headers['content-security-policy'], /frame-ancestors 'self'/)
++  assert.match(viewer.headers.etag, /^W\//)
++  assert.equal(viewer.body, '<!doctype html><title>noVNC</title>\n')
++
++  const module = await request(server.port, { path: '/desktop/app/ui.js' })
++  assert.equal(module.status, 200)
++  assert.match(module.headers['content-type'], /^text\/javascript/)
++  assert.equal(module.headers['x-frame-options'], undefined, 'frame policy belongs to documents, not scripts')
++
++  const defaults = await request(server.port, { path: '/desktop/defaults.json' })
++  assert.equal(defaults.status, 200)
++  assert.match(defaults.headers['content-type'], /^application\/json/)
++
++  const redirect = await request(server.port, { path: '/desktop/' })
++  assert.equal(redirect.status, 302)
++  assert.equal(redirect.headers.location, '/desktop/vnc.html')
++})
++
++test('the desktop redirects its mount point to the configured viewer', async (t) => {
++  const assets = await createAssetRoot()
++  const viewer = '/desktop/vnc.html?autoconnect=1&resize=scale&path=%2Fdesktop%2Fwebsockify'
++  const server = await startAssetServer(assets.root, viewer)
++  t.after(async () => { await server.close(); await assets.cleanup() })
++
++  for (const path of ['/desktop', '/desktop/']) {
++    const redirect = await request(server.port, { path })
++    assert.equal(redirect.status, 302, `expected a redirect for ${path}`)
++    assert.equal(redirect.headers.location, viewer)
++  }
++})
++
++test('the desktop refuses escapes, listings and unsupported methods', async (t) => {
++  const assets = await createAssetRoot()
++  const server = await startAssetServer(assets.root)
++  t.after(async () => { await server.close(); await assets.cleanup() })
++
++  for (const path of [
++    '/desktop/../secret.txt',
++    '/desktop/%2e%2e/secret.txt',
++    '/desktop/escape.txt',
++    '/desktop/app',
++    '/elsewhere/vnc.html',
++    '/desktop/missing.js',
++  ]) {
++    const response = await request(server.port, { path })
++    assert.equal(response.status, 404, `expected 404 for ${path}`)
++  }
++
++  const method = await request(server.port, { method: 'POST', path: '/desktop/vnc.html' })
++  assert.equal(method.status, 405)
++  assert.equal(method.headers.allow, 'GET, HEAD')
++})
++
++test('the desktop answers HEAD and revalidates with its ETag', async (t) => {
++  const assets = await createAssetRoot()
++  const server = await startAssetServer(assets.root)
++  t.after(async () => { await server.close(); await assets.cleanup() })
++
++  const head = await request(server.port, { method: 'HEAD', path: '/desktop/vnc.html' })
++  assert.equal(head.status, 200)
++  assert.equal(head.body, '')
++  assert.equal(Number(head.headers['content-length']), '<!doctype html><title>noVNC</title>\n'.length)
++
++  const fresh = await request(server.port, {
++    path: '/desktop/vnc.html',
++    headers: { 'if-none-match': head.headers.etag },
++  })
++  assert.equal(fresh.status, 304)
++  assert.equal(fresh.body, '')
++})
++
++test('asset content types and validators are stable', () => {
++  assert.equal(contentType('a/b/rfb.js'), 'text/javascript; charset=utf-8')
++  assert.equal(contentType('a/b/style.css'), 'text/css; charset=utf-8')
++  assert.equal(contentType('a/b/logo.svg'), 'image/svg+xml')
++  assert.equal(contentType('a/b/novnc.ico'), 'image/x-icon')
++  assert.equal(contentType('a/b/unknown.bin'), 'application/octet-stream')
++  // noVNC ships both bell formats; a wrong type under nosniff can silence it.
++  assert.equal(contentType('a/b/bell.mp3'), 'audio/mpeg')
++  assert.equal(contentType('a/b/bell.oga'), 'audio/ogg')
++  const stats = { size: 256, mtimeMs: 1_700_000_000_000 }
++  assert.equal(entityTag(stats), entityTag({ ...stats }))
++  assert.notEqual(entityTag(stats), entityTag({ ...stats, size: 257 }))
++})
++
++test('the desktop socket is fenced to its own origin', () => {
++  const requestWith = (host, origin) => ({ headers: origin === undefined ? { host } : { host, origin } })
++  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'https://dsh.example.com')), true)
++  // A default port is the same authority, and authority casing never matters.
++  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'https://DSH.Example.COM:443')), true)
++  assert.equal(isSameOriginRequest(requestWith('dsh.example.com:8443', 'https://dsh.example.com:8443')), true)
++  // A different peer, a different port and a different scheme-bearing host fail.
++  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'https://evil.example')), false)
++  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'https://dsh.example.com.evil.example')), false)
++  assert.equal(isSameOriginRequest(requestWith('dsh.example.com:8443', 'https://dsh.example.com')), false)
++  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'null')), false)
++  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', 'file:///etc/passwd')), false)
++  // The upgrade route requires Origin; the POST route tolerates a script client.
++  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', undefined)), true)
++  assert.equal(isSameOriginRequest(requestWith('dsh.example.com', undefined), { require: true }), false)
++  // No Host at all can never establish sameness.
++  assert.equal(isSameOriginRequest({ headers: { origin: 'https://dsh.example.com' } }), false)
++
++  assert.equal(normalizeAuthority('DSH.Example.COM.:443'), 'dsh.example.com')
++  assert.equal(normalizeAuthority('[::1]:443'), '[::1]')
++  assert.equal(normalizeAuthority('[::1]:8443'), '[::1]:8443')
++  assert.equal(normalizeAuthority(''), '')
++})
++
++// ---------------------------------------------------------------------------
++// Frame codec: only what noVNC sends, but framed exactly.
++// ---------------------------------------------------------------------------
++
++function clientFrame(opcode, payload = Buffer.alloc(0), { fin = true, mask = true } = {}) {
++  const body = Buffer.from(payload)
++  const length = body.length
++  let header
++  if (length < 126) {
++    header = Buffer.from([(fin ? 0x80 : 0) | opcode, (mask ? 0x80 : 0) | length])
++  } else if (length < 65536) {
++    header = Buffer.alloc(4)
++    header[0] = (fin ? 0x80 : 0) | opcode
++    header[1] = (mask ? 0x80 : 0) | 126
++    header.writeUInt16BE(length, 2)
++  } else {
++    header = Buffer.alloc(10)
++    header[0] = (fin ? 0x80 : 0) | opcode
++    header[1] = (mask ? 0x80 : 0) | 127
++    header.writeBigUInt64BE(BigInt(length), 2)
++  }
++  if (!mask) return Buffer.concat([header, body])
++  const key = Buffer.from([0x12, 0x34, 0x56, 0x78])
++  const masked = Buffer.from(body)
++  for (let index = 0; index < masked.length; index += 1) masked[index] ^= key[index & 3]
++  return Buffer.concat([header, key, masked])
++}
++
++test('the accept token matches RFC 6455 and frames round-trip', () => {
++  assert.equal(acceptKey('dGhlIHNhbXBsZSBub25jZQ=='), 's3pPLMBiTxaQ9kYGzzhZRbK+xOo=')
++  // Only codes a peer may echo are ever sent back.
++  assert.equal(replyCloseCode(1000), 1000)
++  assert.equal(replyCloseCode(1005), 1000)
++  assert.equal(replyCloseCode(1011), 1011)
++  assert.equal(replyCloseCode(42), 1000)
++
++  const messages = []
++  const errors = []
++  const parser = new FrameParser({
++    onMessage: (payload) => messages.push(payload.toString()),
++    onError: (code, reason) => errors.push([code, reason]),
++  })
++  parser.push(clientFrame(0x2, Buffer.from('one')))
++  // Fragmented binary message: the RFB client may split a paste across frames.
++  parser.push(clientFrame(0x2, Buffer.from('tw'), { fin: false }))
++  parser.push(clientFrame(0x0, Buffer.from('o'), { fin: true }))
++  // A frame split across two TCP reads must still assemble.
++  const split = clientFrame(0x2, Buffer.from('three'))
++  parser.push(split.subarray(0, 3))
++  parser.push(split.subarray(3))
++  assert.deepEqual(messages, ['one', 'two', 'three'])
++  assert.deepEqual(errors, [])
++})
++
++test('the frame parser rejects what a browser must never send', () => {
++  const errors = []
++  const parser = new FrameParser({
++    onMessage: () => assert.fail('unexpected message'),
++    onError: (code, reason) => errors.push([code, reason]),
++  })
++  parser.push(clientFrame(0x2, Buffer.from('x'), { mask: false }))
++  assert.equal(errors.at(-1)[0], 1002)
++
++  const text = new FrameParser({ onMessage: () => {}, onError: (code) => errors.push([code]) })
++  text.push(clientFrame(0x1, Buffer.from('x')))
++  assert.equal(errors.at(-1)[0], 1003)
++
++  const fragmentedControl = new FrameParser({ onMessage: () => {}, onError: (code) => errors.push([code]) })
++  fragmentedControl.push(clientFrame(0x9, Buffer.from('x'), { fin: false }))
++  assert.equal(errors.at(-1)[0], 1002)
++})
++
++// ---------------------------------------------------------------------------
++// Bridge: an upgraded socket becomes a transparent RFB byte pipe.
++// ---------------------------------------------------------------------------
++
++function createFrameReader(socket, initial = Buffer.alloc(0)) {
++  const frames = []
++  const waiters = []
++  let buffer = initial
++
++  function takeFrame() {
++    if (buffer.length < 2) return null
++    const opcode = buffer[0] & 0x0f
++    let length = buffer[1] & 0x7f
++    let offset = 2
++    if (length === 126) {
++      if (buffer.length < 4) return null
++      length = buffer.readUInt16BE(2)
++      offset = 4
++    } else if (length === 127) {
++      if (buffer.length < 10) return null
++      length = Number(buffer.readBigUInt64BE(2))
++      offset = 10
++    }
++    assert.equal(buffer[1] & 0x80, 0, 'the server must not mask frames')
++    if (buffer.length < offset + length) return null
++    const payload = Buffer.from(buffer.subarray(offset, offset + length))
++    buffer = buffer.subarray(offset + length)
++    return { opcode, payload }
++  }
++
++  function drain() {
++    for (;;) {
++      const frame = takeFrame()
++      if (frame === null) break
++      frames.push(frame)
++    }
++    while (waiters.length > 0 && frames.length > 0) waiters.shift()(frames.shift())
++  }
++
++  socket.on('data', (chunk) => {
++    buffer = Buffer.concat([buffer, chunk])
++    drain()
++  })
++  drain()
++
++  return {
++    next({ timeoutMs = 5000 } = {}) {
++      return new Promise((resolve, reject) => {
++        if (frames.length > 0) {
++          resolve(frames.shift())
++          return
++        }
++        const timer = setTimeout(() => reject(new Error('timed out waiting for a WebSocket frame')), timeoutMs)
++        waiters.push((frame) => {
++          clearTimeout(timer)
++          resolve(frame)
++        })
++      })
++    },
++  }
++}
++
++async function connectWebSocket(port, { path = '/desktop/websockify', protocols, version = '13' } = {}) {
++  const socket = net.connect(port, '127.0.0.1')
++  await once(socket, 'connect')
++  const lines = [
++    `GET ${path} HTTP/1.1`,
++    'Host: desktop.test',
++    'Upgrade: websocket',
++    'Connection: Upgrade',
++    'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
++    `Sec-WebSocket-Version: ${version}`,
++  ]
++  if (protocols) lines.push(`Sec-WebSocket-Protocol: ${protocols}`)
++  socket.write(`${lines.join('\r\n')}\r\n\r\n`)
++
++  let head = Buffer.alloc(0)
++  while (!head.includes('\r\n\r\n')) {
++    const [chunk] = await once(socket, 'data')
++    head = Buffer.concat([head, chunk])
++  }
++  const index = head.indexOf('\r\n\r\n')
++  return {
++    socket,
++    head: head.subarray(0, index).toString('latin1'),
++    reader: createFrameReader(socket, head.subarray(index + 4)),
++  }
++}
++
++async function startEchoServer() {
++  const sockets = new Set()
++  const server = net.createServer((socket) => {
++    sockets.add(socket)
++    socket.on('close', () => sockets.delete(socket))
++    socket.on('data', (chunk) => socket.write(chunk))
++  })
++  const port = await listen(server)
++  return {
++    port,
++    close: () => new Promise((resolve) => {
++      for (const socket of sockets) socket.destroy()
++      server.close(resolve)
++    }),
++  }
++}
++
++async function startBridgeServer(targetPort) {
++  const sockets = new Set()
++  const server = http.createServer((_request, response) => {
++    response.writeHead(404)
++    response.end()
++  })
++  server.on('upgrade', (request, socket, head) => {
++    sockets.add(socket)
++    socket.on('close', () => sockets.delete(socket))
++    if (!acceptUpgrade(request, socket)) return
++    bridgeToTcp({
++      socket,
++      head,
++      host: '127.0.0.1',
++      port: targetPort,
++      pingIntervalMs: 60000,
++    })
++  })
++  const port = await listen(server)
++  return {
++    port,
++    close: () => new Promise((resolve) => {
++      for (const socket of sockets) socket.destroy()
++      server.close(resolve)
++    }),
++  }
++}
++
++test('the bridge answers the handshake and pipes RFB bytes both ways', async (t) => {
++  const echo = await startEchoServer()
++  const bridge = await startBridgeServer(echo.port)
++  t.after(async () => { await bridge.close(); await echo.close() })
++
++  const client = await connectWebSocket(bridge.port)
++  t.after(() => client.socket.destroy())
++  assert.match(client.head, /^HTTP\/1\.1 101 Switching Protocols/)
++  assert.match(client.head, /Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK\+xOo=/)
++
++  client.socket.write(clientFrame(0x2, Buffer.from('RFB 003.008\n')))
++  const echoed = await client.reader.next()
++  assert.equal(echoed.opcode, 0x2)
++  assert.equal(echoed.payload.toString(), 'RFB 003.008\n')
++
++  // Keep-alive: a browser answers the server's ping, and a client ping is
++  // answered with the same payload.
++  client.socket.write(clientFrame(0x9, Buffer.from('keepalive')))
++  const pong = await client.reader.next()
++  assert.equal(pong.opcode, 0xa)
++  assert.equal(pong.payload.toString(), 'keepalive')
++
++  // RFB is a byte stream: a large desktop update may come back as several
++  // binary messages, but the reassembled bytes must match exactly.
++  const large = Buffer.alloc(300_000, 0x41)
++  client.socket.write(clientFrame(0x2, large))
++  const parts = []
++  let total = 0
++  while (total < large.length) {
++    const frame = await client.reader.next()
++    assert.equal(frame.opcode, 0x2)
++    parts.push(frame.payload)
++    total += frame.payload.length
++  }
++  assert.ok(Buffer.concat(parts).equals(large))
++})
++
++test('the bridge closes with 1003 when a client sends text', async (t) => {
++  const echo = await startEchoServer()
++  const bridge = await startBridgeServer(echo.port)
++  t.after(async () => { await bridge.close(); await echo.close() })
++
++  const client = await connectWebSocket(bridge.port)
++  t.after(() => client.socket.destroy())
++  client.socket.write(clientFrame(0x1, Buffer.from('not binary')))
++  const close = await client.reader.next()
++  assert.equal(close.opcode, 0x8)
++  assert.equal(close.payload.readUInt16BE(0), 1003)
++})
++
++test('the bridge reports an unavailable desktop instead of hanging', async (t) => {
++  // Reserve a port, then close it: nothing listens there any more.
++  const probe = net.createServer()
++  const closedPort = await listen(probe)
++  await new Promise((resolve) => probe.close(resolve))
++
++  const bridge = await startBridgeServer(closedPort)
++  t.after(() => bridge.close())
++
++  const client = await connectWebSocket(bridge.port)
++  t.after(() => client.socket.destroy())
++  const close = await client.reader.next()
++  assert.equal(close.opcode, 0x8)
++  assert.equal(close.payload.readUInt16BE(0), 1011)
++})
++
++test('the upgrade route refuses non-WebSocket and base64-only clients', async (t) => {
++  const echo = await startEchoServer()
++  const bridge = await startBridgeServer(echo.port)
++  t.after(async () => { await bridge.close(); await echo.close() })
++
++  const rejected = await connectWebSocket(bridge.port, { protocols: 'base64' })
++  t.after(() => rejected.socket.destroy())
++  assert.match(rejected.head, /^HTTP\/1\.1 400/)
++
++  const wrongVersion = await connectWebSocket(bridge.port, { version: '8' })
++  t.after(() => wrongVersion.socket.destroy())
++  assert.match(wrongVersion.head, /^HTTP\/1\.1 426/)
++
++  // A client that offers "binary" gets it echoed back.
++  const accepted = await connectWebSocket(bridge.port, { protocols: 'binary' })
++  t.after(() => accepted.socket.destroy())
++  assert.match(accepted.head, /^HTTP\/1\.1 101/)
++  assert.match(accepted.head, /Sec-WebSocket-Protocol: binary/)
++})
++
++// ---------------------------------------------------------------------------
++// Plugin wiring: the route table the Harness web server ends up with.
++// ---------------------------------------------------------------------------
++
++/** Minimal stand-in for the upgraded socket a web server hands to the handler. */
++class FakeSocket {
++  constructor() {
++    this.writes = []
++    this.ends = []
++    this.destroyed = false
++  }
++
++  get output() {
++    return this.writes.join('')
++  }
++
++  get ended() {
++    return this.ends.join('')
++  }
++
++  write(chunk) {
++    this.writes.push(String(chunk))
++    return true
++  }
++
++  end(chunk) {
++    if (chunk !== undefined) this.ends.push(String(chunk))
++    return this
++  }
++
++  destroy() {
++    this.destroyed = true
++  }
++
++  destroySoon() {
++    this.destroyed = true
++  }
++
++  setNoDelay() { return this }
++  pause() { return this }
++  resume() { return this }
++  on() { return this }
++  once() { return this }
++}
++
++test('the plugin mounts the viewer, the socket and the tool routes', async (t) => {
++  const assets = await createAssetRoot()
++  t.after(() => assets.cleanup())
++
++  const plugin = await import(join(pluginRoot, 'index.js'))
++  const routes = []
++  const disposers = []
++  let effectCleanup = () => {}
++  const ctx = {
++    logger: { info: () => {}, warn: () => {}, error: () => {} },
++    systemPrompt: { section: () => {} },
++    tools: { register: () => {} },
++    webServer: {
++      register(route) {
++        routes.push({ kind: route.kind, path: route.path, handler: route.handler })
++        return () => disposers.push(route.path)
++      },
++      registerUpgrade(route) {
++        routes.push({ kind: 'upgrade', path: route.path, handler: route.handler })
++        return () => disposers.push(route.path)
++      },
++    },
++    effect(fn) {
++      effectCleanup = fn()
++      return () => {}
++    },
++  }
++
++  plugin.apply(ctx, { novncRoot: assets.root, vncPort: 1 })
++  assert.deepEqual(routes.map((route) => [route.kind, route.path]), [
++    ['exact', '/browser-desktop/state'],
++    ['exact', '/browser-desktop/open'],
++    ['prefix', '/desktop'],
++    ['upgrade', '/desktop/websockify'],
++  ])
++
++  // The state route tells the panel where to point the iframe: same origin,
++  // desktop prefix, socket path pinned.
++  const state = routes[0]
++  const response = await new Promise((resolve) => {
++    const res = { statusCode: 0, body: '', headers: {}, writeHead(status) { this.statusCode = status }, end(body = '') { this.body = body; resolve(this) } }
++    state.handler({ method: 'GET', headers: {} }, res)
++  })
++  assert.equal(response.statusCode, 200)
++  const payload = JSON.parse(response.body)
++  assert.equal(payload.desktop.path.startsWith('/desktop/vnc.html?'), true)
++  assert.equal(new URL(payload.desktop.path, 'https://dsh.example.com').searchParams.get('path'), '/desktop/websockify')
++  assert.equal(payload.pollIntervalMs, 750)
++
++  // The upgrade route is fenced: a foreign page or a client without Origin must
++  // never reach the RFB stream, because whoever gets there owns the browser.
++  const upgrade = routes.find((route) => route.kind === 'upgrade')
++  assert.ok(upgrade, 'the plugin must register the RFB upgrade route')
++  const handshake = {
++    upgrade: 'websocket',
++    connection: 'Upgrade',
++    'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
++    'sec-websocket-version': '13',
++    host: 'dsh.example.com',
++  }
++  const attempt = (headers) => {
++    const socket = new FakeSocket()
++    upgrade.handler({ headers: { ...handshake, ...headers } }, socket, Buffer.alloc(0))
++    return socket
++  }
++
++  const foreign = attempt({ origin: 'https://evil.example' })
++  assert.match(foreign.ended, /403 Forbidden/)
++  assert.doesNotMatch(foreign.output, /101/)
++
++  const anonymous = attempt({})
++  assert.match(anonymous.ended, /403 Forbidden/)
++  assert.doesNotMatch(anonymous.output, /101/)
++
++  const sameOrigin = attempt({ origin: 'https://dsh.example.com' })
++  assert.match(sameOrigin.output, /101 Switching Protocols/)
++
++  // Disposal must release every route it claimed.
++  effectCleanup()
++  assert.equal(disposers.length, 4)
++})
++
++test('the server keeps frames unmasked and honours a split handshake', () => {
++  const frame = encodeFrame(0x2, Buffer.from('abc'))
++  assert.equal(frame[0], 0x82)
++  assert.equal(frame[1] & 0x80, 0, 'server frames are never masked')
++  assert.equal(frame[1] & 0x7f, 3)
++  assert.equal(frame.subarray(2).toString(), 'abc')
++})
+diff --git a/deepseek-harness/test-market.mjs b/deepseek-harness/test-market.mjs
+new file mode 100644
+index 0000000..6757801
+--- /dev/null
++++ b/deepseek-harness/test-market.mjs
+@@ -0,0 +1,70 @@
++import assert from 'node:assert/strict'
++import { existsSync, readFileSync } from 'node:fs'
++import { isAbsolute, join } from 'node:path'
++import test from 'node:test'
++import { pathToFileURL } from 'node:url'
++
++// The image ships the market next to DSH's own packages, where its
++// `@deepseek-ai/*` peers resolve, and the overlay row names it by absolute
++// path. That keeps the data volume free of image-owned symlinks and lets the
++// client roster find `dsh.client` from the package's nearest manifest.
++// Overridable so the same assertions can run against a checkout fixture.
++const IMAGE_ROOT = '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/dshmarket'
++const packageRoot = process.env.DSH_MARKET_ROOT ?? IMAGE_ROOT
++const patchPath =
++  process.env.DSH_MARKET_PATCH ?? '/opt/deepseek-harness/web-market.cordis.patch.yml'
++const desktopPatchPath =
++  process.env.DSH_DESKTOP_PATCH ?? '/opt/deepseek-harness/web-desktop.cordis.patch.yml'
++const fixture = process.env.DSH_MARKET_ROOT !== undefined
++
++const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
++
++/** Read the `- id: … / name: …` rows of an overlay file, in order. */
++function rowsOf(source) {
++  return [...source.matchAll(/^\s+-\s+id:\s*(\S+)\s*\n\s+name:\s*(\S+)/gm)].map(
++    ([, id, name]) => ({ id, name }),
++  )
++}
++
++test('the image ships dsh-market as a DSH bundle', () => {
++  assert.equal(manifest.name, 'dshmarket')
++  assert.match(manifest.version, /^\d+\.\d+\.\d+/)
++  assert.equal(manifest.dsh?.bundle?.patch, './cordis.patch.yml')
++  assert.ok(manifest.dependencies && 'undici' in manifest.dependencies)
++})
++
++test('the plugin declares the Web client half the roster needs', () => {
++  assert.equal(manifest.dsh?.client?.platform, 'web')
++  assert.ok(Array.isArray(manifest.dsh.client.inject))
++  assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings'))
++})
++
++test('the market overlay mounts the image copy by absolute path', () => {
++  const patch = readFileSync(patchPath, 'utf8')
++  const rows = rowsOf(patch)
++  assert.deepEqual(rows.map((row) => row.id), ['dsh-market'])
++  const entry = rows[0].name
++  assert.ok(isAbsolute(entry), `overlay must use an absolute path, got ${entry}`)
++  assert.equal(entry, join(IMAGE_ROOT, manifest.main))
++  if (!fixture) assert.ok(existsSync(entry), `market entry is missing from the image: ${entry}`)
++  assert.match(patch, /DSH_MARKET_ENABLED === '0'/)
++  assert.match(patch, /^\s+allowRestart: false$/m)
++})
++
++test('the desktop overlay mounts every image plugin by absolute path', () => {
++  const rows = rowsOf(readFileSync(desktopPatchPath, 'utf8'))
++  assert.deepEqual(
++    rows.map((row) => row.id),
++    ['browser-use', 'browser-use-playwright-mcp', 'browser-desktop'],
++  )
++  for (const row of rows) {
++    assert.ok(isAbsolute(row.name), `${row.id} must use an absolute path, got ${row.name}`)
++    assert.ok(existsSync(row.name), `${row.id} entry is missing from the image: ${row.name}`)
++  }
++})
++
++test('the host can import the plugin module', async () => {
++  const module = await import(pathToFileURL(join(packageRoot, manifest.main)).href)
++  assert.equal(module.name, 'dsh-market')
++  assert.equal(typeof module.apply, 'function')
++})
 diff --git a/deepseek-harness/test-runtime.mjs b/deepseek-harness/test-runtime.mjs
-index 143af1d..2880d83 100644
+index 143af1d..63024aa 100644
 --- a/deepseek-harness/test-runtime.mjs
 +++ b/deepseek-harness/test-runtime.mjs
 @@ -1,11 +1,10 @@
@@ -774,7 +3736,7 @@ index 143af1d..2880d83 100644
  import { join } from 'node:path'
  import test from 'node:test'
  import vm from 'node:vm'
-@@ -51,80 +50,473 @@ test('embedded PDF worker initializes its own Iterator helpers', async t => {
+@@ -51,80 +50,515 @@ test('embedded PDF worker initializes its own Iterator helpers', async t => {
    assert.equal(result.ok, true)
  })
  
@@ -812,7 +3774,12 @@ index 143af1d..2880d83 100644
 -    for await (const chunk of request) body += chunk
 -    response.setHeader('Content-Type', 'application/json')
 -    response.end(JSON.stringify({ ok: true, headers: request.headers, body: body ? JSON.parse(body) : null }))
--  })
++    request.on('data', (chunk) => { body += chunk })
++    request.on('end', () => {
++      requests.push({ method: request.method, url: request.url, headers: request.headers, body })
++      handler(request, response, { body, requests })
++    })
+   })
 -  backend.listen(0, '127.0.0.1')
 -  await once(backend, 'listening')
 -  t.after(() => new Promise(resolve => backend.close(resolve)))
@@ -846,20 +3813,6 @@ index 143af1d..2880d83 100644
 -      let body = ''
 -      response.on('data', chunk => { body += chunk })
 -      response.on('end', () => resolve({ status: response.statusCode, body }))
-+    request.on('data', (chunk) => { body += chunk })
-+    request.on('end', () => {
-+      requests.push({ method: request.method, url: request.url, headers: request.headers, body })
-+      handler(request, response, { body, requests })
-     })
--    req.setTimeout(3000, () => req.destroy(new Error('proxy request timed out')))
--    req.on('error', reject)
--    req.end(JSON.stringify({ value: 'test' }))
-   })
--  for (let attempt = 0; ; attempt++) {
--    try { await request('/'); break } catch (error) {
--      if (attempt === 100 || processCaddy.exitCode !== null) throw new Error(logs, { cause: error })
--      await new Promise(resolve => setTimeout(resolve, 100))
--    }
 +  server.on('upgrade', (request, socket) => {
 +    upgraded.add(socket)
 +    socket.on('close', () => upgraded.delete(socket))
@@ -912,16 +3865,7 @@ index 143af1d..2880d83 100644
 +    if (output.includes('listening on')) break
 +    if (child.exitCode !== null) throw new Error(`proxy exited: ${output}`)
 +    await new Promise((resolve) => setTimeout(resolve, 50))
-   }
--  for (const endpoint of ['settings/describe', 'settings/update', 'settings/replace', 'settings/mutate', 'credentials/describe', 'credentials/set', 'credentials/unset', 'llm/discoverModels']) {
--    const response = await request(`/api/${endpoint}`)
--    assert.equal(response.status, 200, endpoint)
--    const data = JSON.parse(response.body)
--    assert.equal(data.ok, true)
--    assert.equal(data.headers.host, `127.0.0.1:${backendPort}`)
--    assert.equal(data.headers.origin, undefined)
--    assert.equal(data.headers.authorization, undefined)
--    assert.equal(data.body.value, 'test')
++  }
 +  assert.ok(output.includes('listening on'), `proxy did not start: ${output}`)
 +  const match = /listening on [^\s]+:(\d+)/.exec(output)
 +  assert.ok(match, `proxy did not report its port: ${output}`)
@@ -929,18 +3873,14 @@ index 143af1d..2880d83 100644
 +  return {
 +    port,
 +    child,
++    output: () => output,
 +    stop: async () => {
 +      if (child.exitCode !== null) return
 +      const exited = once(child, 'exit')
 +      child.kill('SIGTERM')
 +      await exited
 +    },
-   }
--  const beforeRejected = forwarded
--  for (const pathname of ['/api', '/api/settings/update', '/api/credentials/set', '/api/remote.mux']) {
--    for (const headers of [{ Origin: 'https://attacker.invalid' }, { Origin: 'null' }, { Origin: `http://127.0.0.1:${port}` }, { Origin: 'https://127.0.0.1:1' }, { 'Sec-Fetch-Site': 'cross-site' }, { Origin: '', 'Sec-Fetch-Site': 'cross-site' }]) {
--      assert.equal((await request(pathname, headers)).status, 403)
--    }
++  }
 +}
 +
 +/** One HTTP request against the proxy; resolves with status, headers and body. */
@@ -1011,7 +3951,8 @@ index 143af1d..2880d83 100644
 +  const raw = await new Promise((resolve) => {
 +    const socket = net.connect(proxy.port, '127.0.0.1', () => {
 +      socket.write('GET / HTTP/1.0\r\n\r\n')
-+    })
+     })
+-    req.setTimeout(3000, () => req.destroy(new Error('proxy request timed out')))
 +    let received = ''
 +    socket.on('data', (chunk) => { received += chunk })
 +    socket.on('close', () => resolve(received))
@@ -1046,13 +3987,75 @@ index 143af1d..2880d83 100644
 +      },
 +    )
 +    req.setTimeout(10000, () => req.destroy(new Error('stream timed out')))
-+    req.on('error', reject)
+     req.on('error', reject)
+-    req.end(JSON.stringify({ value: 'test' }))
 +    req.end()
-+  })
+   })
+-  for (let attempt = 0; ; attempt++) {
+-    try { await request('/'); break } catch (error) {
+-      if (attempt === 100 || processCaddy.exitCode !== null) throw new Error(logs, { cause: error })
+-      await new Promise(resolve => setTimeout(resolve, 100))
+-    }
+-  }
+-  for (const endpoint of ['settings/describe', 'settings/update', 'settings/replace', 'settings/mutate', 'credentials/describe', 'credentials/set', 'credentials/unset', 'llm/discoverModels']) {
+-    const response = await request(`/api/${endpoint}`)
+-    assert.equal(response.status, 200, endpoint)
+-    const data = JSON.parse(response.body)
+-    assert.equal(data.ok, true)
+-    assert.equal(data.headers.host, `127.0.0.1:${backendPort}`)
+-    assert.equal(data.headers.origin, undefined)
+-    assert.equal(data.headers.authorization, undefined)
+-    assert.equal(data.body.value, 'test')
 +
 +  assert.equal(body, 'first\nsecond\n')
 +  // A buffering proxy would hold "first" until the backend ended 800 ms later.
 +  assert.ok(firstChunkAt - startedAt < 600, `first chunk arrived after ${firstChunkAt - startedAt} ms`)
++})
++
++test('proxy logs a client abort before the response as 499, not 502', { timeout: 30000 }, async (t) => {
++  const backend = await startBackend((_request, response) => {
++    setTimeout(() => {
++      if (response.destroyed || response.writableEnded) return
++      response.writeHead(200, { 'content-type': 'text/plain' })
++      response.end('late')
++    }, 500)
++  })
++  const proxy = await startProxy(backend.port, { PROXY_ACCESS_LOG: '1' })
++  t.after(async () => { await proxy.stop(); await backend.close() })
++
++  await new Promise((resolve) => {
++    const req = http.request(
++      {
++        host: '127.0.0.1',
++        port: proxy.port,
++        method: 'POST',
++        path: '/api/dsws',
++        headers: { Host: ALLOWED_HOST, 'content-type': 'application/json' },
++        agent: false,
++      },
++      () => resolve('response'),
++    )
++    req.on('error', () => resolve('error'))
++    req.end('{}')
++    setTimeout(() => {
++      req.destroy()
++      resolve('aborted')
++    }, 100)
++  })
++
++  let line
++  for (let attempt = 0; attempt < 100; attempt++) {
++    line = proxy.output().split('\n').filter((entry) => entry.includes('"path":"/api/dsws"')).at(-1)
++    if (line !== undefined) break
++    await new Promise((resolve) => setTimeout(resolve, 20))
+   }
+-  const beforeRejected = forwarded
+-  for (const pathname of ['/api', '/api/settings/update', '/api/credentials/set', '/api/remote.mux']) {
+-    for (const headers of [{ Origin: 'https://attacker.invalid' }, { Origin: 'null' }, { Origin: `http://127.0.0.1:${port}` }, { Origin: 'https://127.0.0.1:1' }, { 'Sec-Fetch-Site': 'cross-site' }, { Origin: '', 'Sec-Fetch-Site': 'cross-site' }]) {
+-      assert.equal((await request(pathname, headers)).status, 403)
+-    }
++  assert.ok(line, `proxy wrote no access log for the aborted request: ${proxy.output()}`)
++  assert.equal(JSON.parse(line).status, 499, `client abort was logged as ${JSON.parse(line).status}`)
 +})
 +
 +test('proxy forwards WebSocket upgrades and fences the Host', { timeout: 30000 }, async (t) => {
@@ -1318,3 +4321,75 @@ index 143af1d..2880d83 100644
 +  assert.equal(response.status, 200)
 +  assert.equal(JSON.parse(response.body).bytes, payload.length)
  })
+diff --git a/deepseek-harness/web-desktop.cordis.patch.yml b/deepseek-harness/web-desktop.cordis.patch.yml
+new file mode 100644
+index 0000000..6ced8c1
+--- /dev/null
++++ b/deepseek-harness/web-desktop.cordis.patch.yml
+@@ -0,0 +1,42 @@
++# Extra Cordis overlay passed to `dsh web` by the container entrypoint.
++#
++# It adds three things the plain-HTTP image installs but does not ship in DSH's
++# own bundles: the model-facing Browser Use provider (attached to the same
++# Chromium the human sees), and the browser-desktop plugin that serves the
++# same-origin noVNC viewer.
++#
++# These rows name the image copies by absolute path. The Cordis loader accepts
++# path specifiers, and the client roster discovers each package's `dsh.client`
++# declaration from its nearest `package.json` — so the Web profile needs no
++# symlinks for image content (which previously made the data volume carry
++# image-owned links).
++#
++# `DSH_DESKTOP_ENABLED=0` turns all three off, so the image still boots (and
++# stays usable) on hosts that cannot run the X stack.
++- insert:
++    # Official Browser Use owns model-facing page inspection and interaction.
++    # Attach it to the persistent Chromium shown by the desktop plugin so agent
++    # automation and human takeover share tabs, cookies and login state.
++    - id: browser-use
++      name: /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-browser-use/lib/index.js
++      disabled: !!js process.env.DSH_BROWSER_USE_ENABLED === '0' || process.env.DSH_DESKTOP_ENABLED === '0'
++    - id: browser-use-playwright-mcp
++      name: /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-browser-use-playwright-mcp/lib/index.js
++      disabled: !!js process.env.DSH_BROWSER_USE_ENABLED === '0' || process.env.DSH_DESKTOP_ENABLED === '0'
++      config:
++        mode: attach
++        endpoint: 'http://127.0.0.1:9222'
++    # Same-origin viewer: no extra port, no extra router, no extra certificate.
++    # Deliberately no `webserver` entry: the listening host/port stay owned by
++    # the entrypoint's `--host`/`--port` flags.
++    - id: browser-desktop
++      name: /opt/deepseek-harness/plugins/dsh-browser-desktop/index.js
++      disabled: !!js process.env.DSH_DESKTOP_ENABLED === '0'
++      config:
++        cdpBaseUrl: 'http://127.0.0.1:9222'
++        desktopBasePath: '/desktop'
++        desktopPath: '/vnc.html?autoconnect=1&resize=scale&view_only=0&reconnect=1'
++        wsPath: '/desktop/websockify'
++        novncRoot: '/usr/share/novnc'
++        vncHost: '127.0.0.1'
++        vncPort: 5900
+diff --git a/deepseek-harness/web-market.cordis.patch.yml b/deepseek-harness/web-market.cordis.patch.yml
+new file mode 100644
+index 0000000..37161a3
+--- /dev/null
++++ b/deepseek-harness/web-market.cordis.patch.yml
+@@ -0,0 +1,18 @@
++# Extra Cordis overlay for the image-baked community plugin market (dshmarket).
++# The row names the image copy by absolute path: the Cordis loader accepts path
++# specifiers and the client roster discovers the package's `dsh.client`
++# declaration from its nearest `package.json`, so the Web profile needs no
++# symlink for image content. `DSH_MARKET_ENABLED=0` keeps the package in the
++# image but leaves the row disabled at composition time.
++#
++# The entrypoint omits this overlay when the profile already declares dshmarket
++# as a dependency: that copy supplies the same row through its bundle layer and
++# is left in charge so its self-update keeps working.
++- insert:
++    - id: dsh-market
++      name: /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/dshmarket/lib/index.js
++      disabled: !!js process.env.DSH_MARKET_ENABLED === '0'
++      config:
++        # The container entrypoint owns the DSH lifecycle; the market's own
++        # one-click restart cannot work in this deployment.
++        allowRestart: false
