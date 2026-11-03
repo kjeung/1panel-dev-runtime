@@ -30,7 +30,12 @@
 | `/desktop/core/rfb.js`、`/desktop/defaults.json` | 同上 | 200，类型正确 |
 | `/desktop`（无尾斜杠） | 同上 | 302 → `/desktop/vnc.html` |
 | 路径穿越 / 符号链接逃逸 | `/desktop/../etc/passwd`、`/desktop/%2e%2e/etc/passwd`、指向外部的软链 | 全部 404 |
-| `/desktop/websockify` 升级 | `curl` 手工 WebSocket 握手 | 101，`Sec-WebSocket-Accept` 正确 |
+| `/desktop/websockify` 升级 | `curl` 手工 WebSocket 握手（带同源 `Origin`） | 101，`Sec-WebSocket-Accept` 正确 |
+| 跨站 WebSocket 骑劫 | 带 `Origin: https://evil.example` 握手（直接 3080 与经 8080 两种） | 403，拿不到 RFB 握手；修前曾返回 101 |
+| 缺少 `Origin` 的握手 | 同上但不带 `Origin` | 403（升级路由要求 Origin） |
+| 桌面文档防嵌入 | `curl -D -` 看 `/desktop/vnc.html` | 带 `frame-ancestors 'self'` 与 `X-Frame-Options: SAMEORIGIN` |
+| `/desktop` 跳转 | 同上 | 302 到配置的 viewer（含 `autoconnect` 与 `path`） |
+| 声音 MIME | `/desktop/app/sounds/bell.{mp3,oga}` | `audio/mpeg` / `audio/ogg`（修前是 octet-stream） |
 | x11vnc 缺席时的行为 | 同上（本机无 x11vnc） | 收到 close 帧 `1011 "desktop unavailable"`，原因不泄露内部地址 |
 | `/browser-desktop/state` | 同上 | 返回同源 `desktop.path`（含 `path=/desktop/websockify`） |
 | `/browser-desktop/open` 同源校验 | 跨源 `Origin` POST | 403 |
@@ -69,7 +74,8 @@ docker compose exec -T deepseek-harness curl -fsS \
 # 经反代（Host 必须是 DSH_ACCESS_HOST）
 curl -fsS -o /dev/null -w '%{http_code}\n' -H 'Host: dsh.example.com' \
   http://127.0.0.1:8080/desktop/vnc.html                      # 200
-curl -i -N -H 'Host: dsh.example.com' -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+curl -i -N -H 'Host: dsh.example.com' -H 'Origin: https://dsh.example.com' \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
   -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
   http://127.0.0.1:8080/desktop/websockify | head -3          # 101（升级后由 x11vnc 说话）
 ```
@@ -81,7 +87,10 @@ curl -i -N -H 'Host: dsh.example.com' -H 'Connection: Upgrade' -H 'Upgrade: webs
 | 风险 | 缓解 |
 | --- | --- |
 | 镜像体积增加约 0.4–0.5 GB（Chromium + 字体 + X 栈） | 与访问方式无关；不需要桌面时用 `DSH_DESKTOP_ENABLED=0` 关闭运行，但层仍在 |
-| dsh 升级后 `webServer` 路由 API 变化 | 构建期导入 + 单测 fail-fast；见 `SYNC-UPSTREAM.md` §5 第 3.5 条 |
+| dsh 升级后 `webServer` 路由 API 变化 | 构建期 import 真实 `dsh-host-webserver` 断言 `register`/`registerUpgrade` + 临时 `DSH_HOME` 的 `--dump-config` + 单测；见 `SYNC-UPSTREAM.md` §5 第 3.5 条 |
+| 跨站 WebSocket 骑劫（CSWSH） | 升级路由强制 `Origin` 且要求与 `Host` 同 authority；缺失即 403（构建期与实测覆盖） |
+| 桌面被第三方页面 iframe | 桌面文档带 `frame-ancestors 'self'` + `X-Frame-Options: SAMEORIGIN` |
+| 桌面可读容器文件（`file:///data/dsh/…`） | 文档化为单 owner 取舍；多用户必须一人一容器 |
 | 反代加 `buffering`/`compress` 破坏桌面 socket | 文档 + §6 排障表 |
 | 面板与 DSH 同进程，重启即断流 | 文档化为取舍；浏览器 profile 持久化，登录态不丢 |
 | 桌面无按用户隔离 | 文档化为限制：多租户请一个容器一个用户 |

@@ -459,6 +459,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 | 面板刚打开就断开，日志反复 `chromium exited; restarting` | `/dev/shm` 太小导致渲染进程崩溃；compose 已设 `shm_size: 1gb`，自定义部署请保留。也可能是 `CHROME_USER_DATA_DIR` 不可写（NFS/权限）。 |
 | 桌面里中文显示成方块 | 镜像缺 `fonts-noto-cjk`：确认用的是本仓库构建的镜像，而不是上游其它镜像。 |
 | 面板 `403 forbidden` | 与其他路径一样：反代改写了 Host（白名单不匹配），或开了 `PROXY_SHARED_SECRET` 但反代没带 `X-DSH-Proxy-Secret`。 |
+| 面板打开即断、日志 `rejected a cross-origin WebSocket upgrade` | 桌面 WebSocket 的 Origin 栅栏拒绝：反代改写了 Host，或手工冒烟没带 `Origin`。浏览器正常访问不受影响。 |
 | 镜像构建失败：`unexpected browser proxy authentication source shape` / `unexpected PDF worker source shape` / `unexpected web manifest link source shape` / `unexpected HMR SSE close handler source shape` | dsh 版本变了，构建期补丁的精确字符串不再匹配。按 [SYNC-UPSTREAM.md §5](SYNC-UPSTREAM.md#5-dsh-版本升级最需要注意的一步) 更新 `patch-dsh-authenticated-settings.mjs` / `patch-dsh-manifest-sse.mjs`，再跑端到端验证。 |
 | 流式输出变成一次性出现 | 外部反代或中间层缓冲了响应（`proxy_buffering off`、别加 gzip 中间件）。 |
 | 上传文件 413 | 外部反代 `client_max_body_size` 太小（需 ≥300 MiB）。 |
@@ -564,11 +565,16 @@ docker compose exec -T deepseek-harness curl -fsS -o /dev/null -w '%{http_code}\
 curl -fsS -o /dev/null -w '%{http_code}\n' -H 'Host: dsh.example.com' \
   http://127.0.0.1:8080/desktop/vnc.html          # 200
 
-curl -i -N -H 'Host: dsh.example.com' \
+curl -i -N -H 'Host: dsh.example.com' -H 'Origin: https://dsh.example.com' \
   -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
   -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
   http://127.0.0.1:8080/desktop/websockify | head -3   # 期望 HTTP/1.1 101
 ```
+
+> 桌面 WebSocket 与 DSH 自己的 `/api` 升级一样有 **Origin 栅栏**：`Origin` 必须与 `Host`
+> 同 authority（host+port），**缺失 `Origin` 直接 403**。所以上面的手工冒烟必须带
+> `Origin`；浏览器正常访问不受影响。反代若改写了 `Host`（例如用 `$host` 丢掉端口），
+> 桌面会像 `/api` 一样 403。
 
 ### 10.3 资源与日志
 
@@ -588,6 +594,14 @@ curl -i -N -H 'Host: dsh.example.com' \
 - 能访问 `/desktop/websockify` 的人就拥有容器里的这个浏览器：能读它的 Cookie、用它出网、
   操作它打开的页面。认证边界与 Harness UI 完全相同，所以反代中间件必须覆盖 `/desktop`
   前缀**以及** WebSocket 升级。
+- 桌面 WebSocket 还有一层与 `/api` 同等的 **Origin 栅栏**：`Origin` 的 host+port 必须等于
+  `Host`，缺失 `Origin` 直接拒绝。这挡住跨站 WebSocket 骑劫（别的网页借浏览器既有
+  凭据打开桌面 socket）。注意它**不能**替代认证：同源页面（含被 XSS 的 Harness 页面）仍可连。
+- 桌面文档带 `frame-ancestors 'self'` + `X-Frame-Options: SAMEORIGIN`，只有同源的
+  Harness UI 能把它嵌进 iframe；别处的点击劫持因此不成立。
+- 桌面里的 Chromium 以 `node` 身份运行，地址栏可以直接打开 `file:///data/dsh/…`
+  （含 `.credentials.yaml`、`home/.config/gh/hosts.yml`）以及 `/workspace`：能打开桌面的人
+  就有 node 级的读权限。单 owner 场景可接受；多用户场景必须一人一容器（见 §9 已知限制）。
 - “认证后剥离反代自己的会话 Cookie 再回源”的建议同样适用于桌面路径。
 - 浏览器 profile 在 `/data/dsh/chrome-profile`，与 DSH 凭据同属高敏感数据，按 `/data/dsh` 的
   权限与备份流程处理。
@@ -603,6 +617,19 @@ curl -i -N -H 'Host: dsh.example.com' \
 | noVNC 资源 | Debian `novnc` 包 | 固定 1.6.0，镜像内置（bookworm 的 1.3.0 需要显式 host） |
 | 面板 URL | 改端口（`desktopPort`） | 同源路径，无端口概念 |
 | 认证 | DSH 自身 token/cookie 或 Caddy LAN 网关 | 外部反代（与本镜像既有模型一致） |
+
+### 10.6 Browser Use 的两个限制
+
+`mode: attach` 的浏览器**不是**“每个 Session 一套”，升级或排障时要知道：
+
+- **一个 provider 实例内，同一时刻只有一个活跃 Session 拥有这个浏览器。** 其他 Session
+  暂时没有 Browser Use 工具（面板与 `browser_open` 仍可用）；要让新会话接手，新建或
+  恢复一个 Session。
+- **Chromium 重启后 provider 不会自动重连。** `desktop-supervisor.sh` 会原地重启 Chromium，
+  noVNC 面板会自动重连并恢复画面，但模型侧工具要新建/恢复 Session 才会回来。
+
+模型自动化与人工接管共享同一个浏览器的标签页、Cookie 与登录态：这既是特性（人工完成
+登录后模型接着用），也是风险（没有按用户隔离，见 §10.4 与 §9）。
 
 ## 许可证
 

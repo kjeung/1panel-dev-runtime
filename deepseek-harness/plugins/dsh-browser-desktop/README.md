@@ -42,12 +42,13 @@ from the image; run it in the build or link that package into
 | Route | Kind | Purpose |
 | --- | --- | --- |
 | `/desktop/*` | HTTP prefix | noVNC 1.6 assets, revalidated on every load |
-| `/desktop/websockify` | WebSocket upgrade | RFB over WebSocket, bridged to x11vnc |
+| `/desktop/websockify` | WebSocket upgrade | RFB over WebSocket, bridged to x11vnc; Origin must equal Host |
 | `/browser-desktop/state` | HTTP exact | panel state + viewer path + poll interval |
 | `/browser-desktop/open` | HTTP exact (POST) | `browser_open` over CDP, same-origin only |
 
-`/desktop` alone redirects to `/desktop/vnc.html`. The viewer URL carries an
-explicit `path=/desktop/websockify` query parameter, so noVNC never guesses the
+`/desktop` redirects to the configured viewer (autoconnect and the pinned socket
+path included). The viewer URL carries an explicit
+`path=/desktop/websockify` query parameter, so noVNC never guesses the
 socket location from the page URL.
 
 ## Configuration
@@ -73,6 +74,13 @@ persisted profile (`/data/dsh/chrome-profile`). Whoever reaches
 `/desktop/websockify` owns that desktop. The image relies on the operator's
 reverse proxy for authentication exactly as it does for the Harness UI:
 
+- the RFB upgrade is fenced like Harness' own `/api` socket: the request's `Origin`
+  must name the same host (and port) as its `Host` header, and a handshake without
+  `Origin` is refused. Without that fence any page the user visits could open
+  `wss://<harness>/desktop/websockify` with the browser's ambient credentials and
+  take the desktop over (cross-site WebSocket hijacking);
+- the viewer document is served with `frame-ancestors 'self'` + `X-Frame-Options:
+  SAMEORIGIN`, so only the Harness UI on this origin may frame it;
 - keep port `8080` reachable only from the authenticated proxy;
 - keep the authenticating middleware on the whole router, including the
   WebSocket upgrade;
@@ -83,12 +91,20 @@ reverse proxy for authentication exactly as it does for the Harness UI:
 
 ## Behaviour notes
 
-- **No `--no-sandbox` weakening beyond the browser.** The container drops every
-  capability it can, so Chromium's own sandbox cannot initialize; only the
-  `chromium-docker` wrapper passes `--no-sandbox`, scoped to that process.
+- **No `--no-sandbox` weakening beyond the browser.** This image installs neither
+  the setuid `chromium-sandbox` helper nor an unprivileged user namespace, so
+  Chromium reports `No usable sandbox!`; only the `chromium-docker` wrapper
+  passes `--no-sandbox`, scoped to that process. The reference compose also sets
+  `no-new-privileges`, which forecloses the setuid-helper option on purpose.
 - **The panel survives Chromium restarts.** `desktop-supervisor.sh` restarts the
   browser and the RFB server, while the bridge reports a closed socket to the
   browser so noVNC reconnects instead of hanging.
 - **A Harness restart ends the desktop stream.** The bridge lives inside the
   Harness web server; restarting the container drops the VNC session and keeps
   the browser profile.
+- **Browser Use is per-Session and does not survive a browser restart.** Within
+  one provider instance a single live Session owns the attached browser; other
+  Sessions continue without Browser Use (the panel and `browser_open` remain
+  usable). The supervisor restarts Chromium after a crash or a manual stop, and
+  the provider does not reconnect: create or resume a Session to get the
+  tools back. The noVNC panel, by contrast, reconnects on its own.

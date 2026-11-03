@@ -98,8 +98,10 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
    `.github/workflows/deepseek-harness-release.yml` 的 `dshVersion` 默认值，保持三者一致。
 3.5 **桌面集成也要复核**（与 dsh 版本绑定）：
    - `deepseek-harness/plugins/dsh-browser-desktop/index.js` 依赖 `ctx.webServer.register({kind:'prefix'})` 与
-     `ctx.webServer.registerUpgrade({path})`（`@deepseek-ai/dsh-host-webserver`）。这两个 API 消失或语义变化时，
-     构建期的插件导入测试与 `node -e` 断言会失败，必须按新 API 改写静态路由与 RFB 桥接的挂载方式。
+     `ctx.webServer.registerUpgrade({path})`（`@deepseek-ai/dsh-host-webserver`）。构建期会 import 真实的
+     `@deepseek-ai/dsh-host-webserver` 并断言这两个方法存在（不是 mock），同时用临时 `DSH_HOME` 跑一次
+     `dsh web --patch … --dump-config` 验证 overlay 仍能合成；API 或 patch 语义变化会在构建期失败，
+     这时按新 API 改写静态路由与 RFB 桥接的挂载方式。
    - `deepseek-harness/web-desktop.cordis.patch.yml` 依赖 `insert` + `disabled: !!js …` 的 patch 语义；
      插件名 `@1panel/dsh-browser-desktop` 必须仍能由 `$DSH_HOME/profiles/web/node_modules` 的软链解析。
    - Browser Use 两个包必须与 `DSH_VERSION` 同版本安装（Dockerfile 的 `browser-use` 阶段），

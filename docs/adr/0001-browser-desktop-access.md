@@ -128,6 +128,8 @@ Cookie 与 `frame-ancestors` 的问题与 A 相同。只有在"反代完全不�
 | --- | --- |
 | 静态资源 | `GET /desktop/*`（noVNC 1.6.0，镜像内置，带 ETag 重新校验） |
 | RFB | `WSS /desktop/websockify` → 进程内 → `127.0.0.1:5900`（x11vnc） |
+| RFB 栅栏 | `Origin` 必须与 `Host` 同 authority（缺失即 403），等价于 `/api` 的跨站栅栏 |
+| 防嵌入 | 桌面文档带 `frame-ancestors 'self'` + `X-Frame-Options: SAMEORIGIN` |
 | 面板状态 | `GET /browser-desktop/state` |
 | 打开页面 | `POST /browser-desktop/open`（同源校验） |
 | 端口 | 仍然只有 `8080` |
@@ -157,6 +159,8 @@ Cookie 与 `frame-ancestors` 的问题与 A 相同。只有在"反代完全不�
   真有需求时再显式开口子。
 
 **风险控制**
+- 桌面 socket 与 `/api` 使用同一套 Origin 语义：跨站页面不能借浏览器的既有凭据打开桌面（CSWSH），
+  手工冒烟与自动化测试都要带同源 `Origin`。
 - Authentik 中间件必须覆盖整个 router（本方案天然覆盖，但仍应在变更时检查）。
 - 反代不要加 `buffering` / `compress` 中间件：会同时破坏桌面 WebSocket 与 SSE。
 - 桌面 socket 每 30 s 发一次 WebSocket ping，避免空闲被中间层切断。
