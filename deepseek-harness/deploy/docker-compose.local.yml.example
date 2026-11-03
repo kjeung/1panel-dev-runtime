@@ -20,6 +20,18 @@
 #   - 默认全部注释，只取消你要改的项；本文件保持合法，复制即可用。
 #   - 变量值优先写 .env（compose 自动读取，基础文件已转发大部分变量）。
 #     只有"基础文件没有转发的变量"才需要写在本文件的 environment 里，二者别重复。
+#
+# 为什么这里只写差异、不抄 docker-compose.yml / docker-compose.traefik.yml 的全文：
+#   compose 的 -f 是"层层叠加"（mapping 按 key 合并、sequence 追加、标量后者覆盖），
+#   入库文件仍然参与合并，所以本文件不需要重复它们的完整内容。
+#   如果你确实需要"单文件自包含"（例如某个平台只接受一个 compose 文件），不要手工维护
+#   副本，用合并结果生成快照：
+#
+#     docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
+#                    -f docker-compose.local.yml config > merged.yml
+#
+#   注意 config 会做变量插值（快照里会有真实密钥，别提交/外传），并已应用 !reset；
+#   它不会随 git pull 更新，上游改了 compose 需要重新生成——这也是默认用差异文件的理由。
 # =============================================================================
 
 services:
@@ -64,11 +76,13 @@ services:
       # CHROME_USER_DATA_DIR: /data/dsh/chrome-profile
 
     # ---- 端口 ----
-    # 默认只发布到宿主机回环 127.0.0.1:8080。换宿主机端口：
-    # ports:
+    # 默认只发布到宿主机回环 127.0.0.1:8080。
+    # 注意：ports 的唯一键是 {ip, target, published, protocol}，直接写新端口是"追加"
+    # 而不是替换（8080 和 8081 会同时发布）。换端口要用 !override 整体替换
+    # （Compose >= 2.24.4）：
+    # ports: !override
     #   - "127.0.0.1:8081:8080"
-    # 完全不发布（反代与容器同 docker 网络）时，清空前面文件里的 ports
-    # （需要 Compose >= 2.24）：
+    # 完全不发布（反代与容器同 docker 网络）时清空即可（Compose >= 2.24）：
     # ports: !reset []
 
     # ---- 数据目录 ----
@@ -93,7 +107,8 @@ services:
     #     max-file: "5"
 
     # ---- 网络 ----
-    # 需要额外接入一个 docker 网络时（例如监控网）：
+    # 服务的 networks 是追加语义；新网络必须在顶层 networks: 里声明，否则 compose 报错。
+    # 例：接入一个已存在的监控网络
     # networks:
     #   - traefik
     #   - monitoring
@@ -108,3 +123,9 @@ services:
     # image: registry.example.com/deepseek-harness-plain:0.2.1-rc.5
     # pull_policy: never
     # build: !reset null
+
+# 顶层：上面 networks 例子里用到的外部网络（不在本文件声明就会报未定义）
+# networks:
+#   monitoring:
+#     external: true
+#     name: monitoring

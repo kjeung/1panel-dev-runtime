@@ -88,6 +88,39 @@ docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
 > 如果已经卡在冲突里：`git checkout HEAD -- docker-compose.yml` 取回入库版本，再把你的本机差异搬进
 > `docker-compose.local.yml`，最后 `git add` 并 `git stash drop`（stash 在 pop 冲突后仍会保留）。
 
+**为什么 `docker-compose.local.yml` 只写差异、不抄两个入库文件的全文？** 因为 `-f` 是层层叠加，
+入库文件仍然参与合并：
+
+| 字段类型 | 合并规则 |
+| --- | --- |
+| mapping（`environment`、`logging`、`build.args`…） | 按 key 合并，后者覆盖前者 |
+| sequence（`ports`、`volumes`、`dns`…） | 追加；其中 `ports` 唯一键是 `{ip,target,published,protocol}`、`volumes` 是容器内 `target`，同一键合并/替换而不是重复 |
+| `command` / `entrypoint` / `healthcheck.test` | 整体替换 |
+| 要删除 / 要整体替换 | `!reset`（Compose ≥ 2.24）/ `!override`（≥ 2.24.4） |
+
+所以"换宿主机端口"不能直接写 `ports:`（会变成 8080、8081 同时发布），要用
+`ports: !override`；"不发布端口"用 `ports: !reset []`——模板里已经按这个写法注释好。
+用 `docker compose … config` 可以随时查看合并后的最终模型。
+
+若确实需要"单文件自包含"（例如平台只接受一个 compose 文件），不要手工维护副本，生成快照：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
+               -f docker-compose.local.yml config > merged.yml
+```
+
+`config` 会做变量插值（快照里含有真实密钥，别提交/外传），也不随 `git pull` 更新——上游改了
+compose 就得重新生成，这正是默认使用差异文件的原因。
+
+不想每次敲三个 `-f`：可以把文件列表写进 `.env`（Compose 支持从 `.env` 读取这些预定义变量），
+之后在 `deploy/` 下直接 `docker compose up -d`：
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.traefik.yml:docker-compose.local.yml
+```
+
+> Linux/macOS 用 `:` 分隔；Windows 用 `;`（或自定义 `COMPOSE_PATH_SEPARATOR`）。
+
 上游更新后如何同步见 [SYNC-UPSTREAM.md](SYNC-UPSTREAM.md)：仓库自带每日自动 PR，
 也可以本地 `scripts/sync-upstream.sh` 手动 rebase（需要完整历史；浅克隆请先 `git fetch --unshallow`）。
 
