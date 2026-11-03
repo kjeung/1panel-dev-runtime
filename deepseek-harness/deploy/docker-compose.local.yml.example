@@ -39,6 +39,28 @@ services:
     # 与基础文件一致，仅作为本文件"全注释时仍然合法"的锚点。
     restart: unless-stopped
 
+    # ---- 容器名 ----
+    # 只改 container_name，**不要改 service 名**（`deepseek-harness`）：Traefik 回源地址
+    # `http://deepseek-harness:8080`、文档里的 `docker compose exec -T deepseek-harness …`
+    # 用的都是 service 名，改它会让反代和运维命令一起失效。
+    # container_name 是标量覆盖，直接写新名字即可（本部署是单实例，不用考虑 --scale）：
+    # container_name: dsh-prod
+    #
+    # 想改回 Compose 自动命名（多环境/多实例并存时更合适，配合下面的顶层 name:）：
+    # container_name: !reset null
+    #
+    # 改名后必须重建，否则旧名字的容器会残留：
+    #   docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
+    #                  -f docker-compose.local.yml down
+    #   … up -d --build
+
+    # ---- 网络（服务级）----
+    # 追加语义：写在这里的网络会与 docker-compose.traefik.yml 里的 traefik 并存，
+    # 不会替换它。新增的 key 必须在顶层 networks: 里有定义，否则 compose 报未定义。
+    # networks:
+    #   - traefik
+    #   - monitoring
+
     environment:
       # 镜像默认值（DSH_TELEMETRY_DISABLED=1，任意非空都表示关闭遥测）。写出来只是让
       # 这一节的 environment 保持合法；把它改成别的值也不会“打开”遥测。
@@ -124,8 +146,37 @@ services:
     # pull_policy: never
     # build: !reset null
 
-# 顶层：上面 networks 例子里用到的外部网络（不在本文件声明就会报未定义）
+# ---- 顶层 networks ----
+# mapping 按 key 合并：同名 key 会覆盖/补全入库文件里的定义。
+# external 网络必须已经存在（compose 不会替你创建），先确认名字：
+#   docker network ls
+#
+# 1) 你的 Traefik 实际接入的网络叫 `proxy` 之类时，用这里改掉入库的 `traefik` 网络名
+#    （服务级不用动：docker-compose.traefik.yml 已经把它挂上去了）：
 # networks:
+#   traefik:
+#     external: true
+#     name: proxy
+#
+# 2) 再额外接入一个已存在的网络时，顶层写它的定义，同时把 key 加到服务级 networks 列表：
+# networks:
+#   traefik:
+#     external: true
+#     name: proxy
 #   monitoring:
 #     external: true
 #     name: monitoring
+#
+# 3) 如果你干脆不用 docker-compose.traefik.yml（只用 base + local），那 local 里要自己
+#    完成它做过的事：服务级 networks 列表 + 顶层网络定义，并可选地清掉发布端口：
+# networks:
+#   proxy:
+#     external: true
+#     name: proxy
+# 服务级：
+#   networks: [proxy]
+#   ports: !reset []
+#
+# 4) 顶层 name: 决定 project 名（默认 deepseek-harness），影响容器/网络/数据卷的归属；
+#    改它等于换一个 project，旧的容器与卷不会自动清理：
+# name: dsh-prod
