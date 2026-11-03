@@ -69,6 +69,25 @@ docker compose logs -f
 - 本地覆盖文件已在 `.gitignore` 里忽略：`.env`、`*.local.yml`、`compose.local.yml`、
   `docker-compose.local.yml`、`docker-compose.override.yml`、`data/`、`workspace/`、`.run/`。
 
+### 本机定制放哪：`docker-compose.local.yml`
+
+入库的 `docker-compose.yml` / `docker-compose.traefik.yml` 只放通用配置。**本机差异**（端口、数据目录、
+资源限制、基础文件没有转发的环境变量）放到 `docker-compose.local.yml`——它已在 `.gitignore` 里，
+`git pull` 不会再和你本机的改动冲突（也就不会再有 stash/pop 冲突）。
+
+```bash
+cp docker-compose.local.yml.example docker-compose.local.yml
+vi docker-compose.local.yml          # 只取消你要改的项
+docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
+               -f docker-compose.local.yml up -d --build
+```
+
+> 一旦用了 `-f`，Compose **不会**再自动加载 `docker-compose.override.yml`：必须像上面这样把每个文件
+> 都显式列出，并把 `docker-compose.local.yml` 放在最后，覆盖才会生效。
+>
+> 如果已经卡在冲突里：`git checkout HEAD -- docker-compose.yml` 取回入库版本，再把你的本机差异搬进
+> `docker-compose.local.yml`，最后 `git add` 并 `git stash drop`（stash 在 pop 冲突后仍会保留）。
+
 上游更新后如何同步见 [SYNC-UPSTREAM.md](SYNC-UPSTREAM.md)：仓库自带每日自动 PR，
 也可以本地 `scripts/sync-upstream.sh` 手动 rebase（需要完整历史；浅克隆请先 `git fetch --unshallow`）。
 
@@ -647,6 +666,7 @@ curl -i -N -H 'Host: dsh.example.com' -H 'Origin: https://dsh.example.com' \
 |---|---|
 | `docker-compose.yml` | 单容器编排（构建/镜像二选一、健康检查、日志轮转、优雅退出） |
 | `.env.example` | 全部环境变量示例与注释 |
+| `docker-compose.local.yml.example` | 本机覆盖模板（端口、数据目录、资源、未转发的变量）；复制为 `docker-compose.local.yml` 使用，该文件不入库 |
 | `../` | 改造后的镜像源码（Dockerfile、entrypoint、node-proxy.mjs、构建期测试） |
 | `patches/` | 相对上游的镜像源码 diff + bundle（基线见 `patches/BASE`）+ 复现说明 |
 | `scripts/sync-upstream.sh` | 一键同步上游：rebase → 测试 → 重新导出 patches → 推送 |
