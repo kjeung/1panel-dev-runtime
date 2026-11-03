@@ -58,9 +58,8 @@ services:
       # 必填：浏览器实际访问的主机名/IPv4（不带协议和端口）。
       # 它同时是 dsh 的 --trusted-host（/api 的 Host 白名单）与反代的 Host 白名单。
       # 留空也能启动 compose，但容器会在入口校验阶段报错退出（错误信息更明确）。
+      # 只读取这一个变量：旧 Caddy 变体的 HTTPS_ACCESS_HOST/DSH_AUTH_* 不会被转发。
       DSH_ACCESS_HOST: ${DSH_ACCESS_HOST:-}
-      # 旧变量名兼容：两者都转发，入口脚本优先用 DSH_ACCESS_HOST。
-      HTTPS_ACCESS_HOST: ${HTTPS_ACCESS_HOST:-}
       # 可选：要求外部反代带 X-DSH-Proxy-Secret 头才转发（纵深防御，不是认证）
       PROXY_SHARED_SECRET: ${PROXY_SHARED_SECRET:-}
       # 访问日志（JSON 行，只记 pathname 不记 query；置 0 关闭）

@@ -98,11 +98,11 @@ DSH 以 uid 1000 运行，`dsh plugin add` / 市场安装直接 `EACCES`。两�
 
 | 位置 | 改动 |
 |---|---|
-| `docker-entrypoint.sh` | 新增 `prepare_dsh_volume`：逐级 `install -d -o node` 创建 `/data/dsh`、`home`、`pnpm-store`、`profiles`、`profiles/web`、`node_modules`；新增 `repair_dsh_volume_ownership`：发现 profile 树里有非 node 属主就 `chown -R -h node:node`；`--self-test` 用临时目录验证"新卷"与"root 属主旧卷"两种输入都归 node |
-| `docker-entrypoint.sh` | 软链镜像内置的 `dshmarket` 到 profile，并追加 `web-market.cordis.patch.yml`；profile 已声明 `dshmarket` 依赖时保留 profile 副本、不追加 overlay（避免 `dsh-market` 行重复插入） |
-| `Dockerfile` | 新增 `dsh-market` 阶段（`npm pack dshmarket@${DSH_MARKET_VERSION}` + 独立前缀安装）并 COPY 进 `…/dsh/node_modules/dshmarket`；`ENV npm_config_store_dir=/data/dsh/pnpm-store`；构建期断言 + `test-market.mjs` + 两个 overlay 的 `--dump-config` |
-| `web-market.cordis.patch.yml` | 插入 `dsh-market` 行，`DSH_MARKET_ENABLED=0` 时禁用，`config.allowRestart: false` |
-| 部署/发布 | compose 转发 `DSH_MARKET_ENABLED`、构建参数 `DSH_MARKET_VERSION`；`.env.example`、release workflow、`sync-upstream.sh` 版本一致性检查同步更新 |
+| `web-desktop.cordis.patch.yml`、`web-market.cordis.patch.yml` | 行名改为镜像内**绝对路径**：Cordis loader 接受路径行，client-modules 从行所指文件最近的 `package.json` 读取 `dsh.client`（实测 roster 同时出现 `browser-desktop/client.js` 与 `dshmarket/client.js`）。镜像插件不再写数据卷的 profile，也不再有"镜像内容软链 + 属主"耦合 |
+| `docker-entrypoint.sh` | 删除 `link_into_profile` 与 profile 内软链；`prepare_dsh_volume` 只以 node 属主建 `/data/dsh`、`home`、`pnpm-store`；`repair_ownership` 在发现非 node 文件时 `chown -R -h` 修复 `/data/dsh/profiles`、`/data/dsh/chrome-profile`、`home/.npm`、`home/.local/share/pnpm`（供 `dsh plugin` / 市场安装社区插件使用）；profile 已声明 `dshmarket` 依赖时不再追加镜像 overlay（避免 `dsh-market` 行重复） |
+| `Dockerfile` | 新增 `dsh-market` 阶段（`npm pack dshmarket@${DSH_MARKET_VERSION}` + 独立前缀安装）并 COPY 进 `…/dsh/node_modules/dshmarket`；`ENV npm_config_store_dir=/data/dsh/pnpm-store`；构建期断言 + `test-market.mjs` + 两个 overlay 的 `--dump-config` + 用 DSH 的 `evaluatePluginCompatibility` 校验市场与当前 DSH 的 peer/engines 兼容性 |
+| 部署/发布 | compose 转发 `DSH_MARKET_ENABLED`、构建参数 `DSH_MARKET_VERSION`；release workflow 增加"拒绝官方 `1panel/deepseek-harness` 镜像名"硬门禁；`sync-upstream.sh` 做版本一致性检查 |
+| 兼容性清理 | 删除旧 Caddy 变体的 `HTTPS_ACCESS_HOST` / `DSH_AUTH_*` / `/data/caddy` 兼容路径与文档承诺；入口只接受 `DSH_ACCESS_HOST` |
 | 文档 | README §10.7、ADR 0002、SYNC-UPSTREAM §4/§5、本文件 |
 
 ### 6.3 验证（本地）
@@ -113,11 +113,14 @@ node --check test-market.mjs
 # 用真实 dshmarket 包做 fixture（DSH 安装目录下没有该包时）
 DSH_MARKET_ROOT=/tmp/market-local/node_modules/dshmarket \
 DSH_MARKET_PATCH=$PWD/web-market.cordis.patch.yml \
+DSH_DESKTOP_PATCH=$PWD/web-desktop.cordis.patch.yml \
   node --test test-market.mjs                            # 5/5
 DSH_HOME=/tmp/cfg-check HOME=/tmp/cfg-home \
   node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
     web --patch "$PWD/web-desktop.cordis.patch.yml" \
         --patch "$PWD/web-market.cordis.patch.yml" --dump-config | grep -A3 dsh-market
+# 绝对路径 overlay 的真实启动（临时 DSH_HOME）：桌面 /desktop/vnc.html 200、
+# /dsh-market/status 返回 version；日志无 did not activate。
 ```
 
 未验证（本环境无 docker）：镜像构建、容器内 `--self-test` 的 root 分支、实际 `chown -R -h` 在

@@ -5,6 +5,12 @@
 # Chromium the human sees), and the browser-desktop plugin that serves the
 # same-origin noVNC viewer.
 #
+# These rows name the image copies by absolute path. The Cordis loader accepts
+# path specifiers, and the client roster discovers each package's `dsh.client`
+# declaration from its nearest `package.json` — so the Web profile needs no
+# symlinks for image content (which previously made the data volume carry
+# image-owned links).
+#
 # `DSH_DESKTOP_ENABLED=0` turns all three off, so the image still boots (and
 # stays usable) on hosts that cannot run the X stack.
 - insert:
@@ -12,10 +18,10 @@
     # Attach it to the persistent Chromium shown by the desktop plugin so agent
     # automation and human takeover share tabs, cookies and login state.
     - id: browser-use
-      name: '@deepseek-ai/dsh-browser-use'
+      name: /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-browser-use/lib/index.js
       disabled: !!js process.env.DSH_BROWSER_USE_ENABLED === '0' || process.env.DSH_DESKTOP_ENABLED === '0'
     - id: browser-use-playwright-mcp
-      name: '@deepseek-ai/dsh-experimental-browser-use-playwright-mcp'
+      name: /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-browser-use-playwright-mcp/lib/index.js
       disabled: !!js process.env.DSH_BROWSER_USE_ENABLED === '0' || process.env.DSH_DESKTOP_ENABLED === '0'
       config:
         mode: attach
@@ -24,7 +30,7 @@
     # Deliberately no `webserver` entry: the listening host/port stay owned by
     # the entrypoint's `--host`/`--port` flags.
     - id: browser-desktop
-      name: '@1panel/dsh-browser-desktop'
+      name: /opt/deepseek-harness/plugins/dsh-browser-desktop/index.js
       disabled: !!js process.env.DSH_DESKTOP_ENABLED === '0'
       config:
         cdpBaseUrl: 'http://127.0.0.1:9222'

@@ -104,8 +104,10 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
      `@deepseek-ai/dsh-host-webserver` 并断言这两个方法存在（不是 mock），同时用临时 `DSH_HOME` 跑一次
      `dsh web --patch … --dump-config` 验证 overlay 仍能合成；API 或 patch 语义变化会在构建期失败，
      这时按新 API 改写静态路由与 RFB 桥接的挂载方式。
-   - `deepseek-harness/web-desktop.cordis.patch.yml` 依赖 `insert` + `disabled: !!js …` 的 patch 语义；
-     插件名 `@1panel/dsh-browser-desktop` 必须仍能由 `$DSH_HOME/profiles/web/node_modules` 的软链解析。
+   - `deepseek-harness/web-desktop.cordis.patch.yml` 依赖 `insert` + `disabled: !!js …` 的 patch 语义，
+     且行名是**镜像内绝对路径**（`/opt/…/index.js`、`…/dsh-browser-use/lib/index.js`）：Cordis loader
+     必须继续接受路径行，client-modules 必须继续从行所指文件最近的 `package.json` 读取 `dsh.client`
+     （构建期 `test-market.mjs` 断言路径存在，部署冒烟检查 roster 里出现 `browser-desktop/client.js`）。
    - Browser Use 两个包必须与 `DSH_VERSION` 同版本安装（Dockerfile 的 `browser-use` 阶段），
      且 Playwright MCP 的 `mode: attach` / `endpoint` 配置键仍受支持。
    - 构建期会跑 `node --test /tmp/test-dsh-desktop.mjs`（路径几何、静态资源越权、帧编解码、真实 WS↔TCP 桥接、
@@ -117,8 +119,9 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
    - 三个默认值保持一致：`deepseek-harness/Dockerfile` 的 `ARG DSH_MARKET_VERSION`、
      `deploy/docker-compose.yml` 的 `DSH_MARKET_VERSION`、`.github/workflows/deepseek-harness-release.yml`
      的 `dshMarketVersion` 输入（`deploy/scripts/sync-upstream.sh` 会检查前两者）；
-   - 构建期会跑 `node --test /tmp/test-dsh-market.mjs`（包身份/bundle 声明/Web 客户端/软链解析/overlay 行）
-     和两个 overlay 的 `--dump-config` 组合，失败即阻断发布。
+   - 构建期会跑 `node --test /tmp/test-dsh-market.mjs`（包身份/bundle 声明/Web 客户端/overlay
+     绝对路径与镜像文件存在性）和两个 overlay 的 `--dump-config` 组合，并用 DSH 的
+     `evaluatePluginCompatibility` 校验 dshmarket 与当前 DSH 的 peer/engines；失败即阻断发布。
 4. 构建镜像并 `docker compose up -d`，确认日志出现
    `DeepSeek Harness is available at http://…:8080`。
 

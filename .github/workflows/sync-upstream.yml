@@ -96,6 +96,8 @@ jobs:
         if: env.MERGED == '1'
         run: |
           node --check deepseek-harness/node-proxy.mjs
+          node --check deepseek-harness/test-market.mjs
+          node --check deepseek-harness/test-desktop.mjs
           node deepseek-harness/node-proxy.mjs --self-test
           bash deepseek-harness/docker-entrypoint.sh --self-test
           workflow_dsh="$(grep -m1 'default: "' .github/workflows/deepseek-harness-release.yml | sed 's/.*default: "//; s/".*//')"

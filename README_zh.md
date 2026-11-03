@@ -7,7 +7,7 @@
 当前仓库主要维护以下镜像：
 
 - `1panel/comfyui`
-- `1panel/deepseek-harness`
+- `kjeung/deepseek-harness-plain`
 - `1panel/hermes-agent`
 - `1panel/openclaw`
 - `1panel/vllm-gb10-dspark`
@@ -18,7 +18,7 @@
 ## 镜像说明
 
 - `1panel/comfyui`：面向 NVIDIA GPU、严格基于上游稳定 Release 构建的 ComfyUI 运行环境镜像
-- `1panel/deepseek-harness`：内置明文 HTTP Node 转发代理、GitHub CLI 与可见 Chromium 桌面（Debian Chromium + 中文字体 + Xvfb/Openbox + noVNC，挂在同源 `/desktop/`，不额外开端口）的 DeepSeek Harness 镜像，需放在已完成认证与 TLS 的反向代理之后。桌面访问方式的取舍见 [ADR 0001](docs/adr/0001-browser-desktop-access.md)
+- `kjeung/deepseek-harness-plain`（本仓库只发布 plain-HTTP 变体；官方 `1panel/deepseek-harness` 仍是 Caddy/HTTPS 镜像）：内置明文 HTTP Node 转发代理、GitHub CLI、社区插件市场 dsh-market 与可见 Chromium 桌面（Debian Chromium + 中文字体 + Xvfb/Openbox + noVNC，挂在同源 `/desktop/`，不额外开端口）的 DeepSeek Harness 镜像，需放在已完成认证与 TLS 的反向代理之后。桌面访问方式的取舍见 [ADR 0001](docs/adr/0001-browser-desktop-access.md)
 - `1panel/hermes-agent`：1Panel 维护的 Hermes Agent 运行环境镜像，内置消息通道相关依赖
 - `1panel/openclaw`：基于 OpenClaw 官方源码构建的运行环境镜像，包含面向 1Panel 场景的定制
 - `1panel/vllm-gb10-dspark`：用于在两台 NVIDIA GB10 节点上部署 DeepSeek V4 Flash 的 ARM64 vLLM 运行环境镜像

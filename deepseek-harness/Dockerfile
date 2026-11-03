@@ -215,6 +215,7 @@ RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh \
     node --test /tmp/test-dsh-runtime.mjs && \
     node --test /tmp/test-dsh-desktop.mjs && \
     node --test /tmp/test-dsh-market.mjs && \
+    node -e "Promise.all([import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'), import('node:fs')]).then(([{ evaluatePluginCompatibility, pluginCompatibilityWarning }, fs]) => { const manifest = JSON.parse(fs.readFileSync('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/dshmarket/package.json', 'utf8')); const issue = evaluatePluginCompatibility(manifest, {}); if (issue) { console.error(pluginCompatibilityWarning(issue)); process.exit(1) } })" && \
     node -e "import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js').then(({ WebServer }) => { const proto = WebServer?.prototype; if (typeof proto?.register !== 'function' || typeof proto?.registerUpgrade !== 'function') { console.error('dsh-host-webserver lost register/registerUpgrade: the desktop routes cannot mount'); process.exit(1) } })" && \
     mkdir -p /tmp/dsh-config-check /tmp/dsh-config-check-home && \
     DSH_HOME=/tmp/dsh-config-check HOME=/tmp/dsh-config-check-home \

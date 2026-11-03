@@ -16,24 +16,22 @@ is_access_host() {
 
 # Data-volume ownership. DSH runs as `node`; every directory it writes must be
 # node-owned, and `install -d` applies `-o/-g` only to the directory it is given
-# (parents it creates stay root-owned), so each level is listed explicitly.
+# (parents it creates stay root-owned), so every managed level is listed.
 prepare_dsh_volume() {
   local root="$1"
   install -d -m 0700 -o node -g node "$root" "$root/home" "$root/pnpm-store"
-  install -d -m 0755 -o node -g node \
-    "$root/profiles" "$root/profiles/web" "$root/profiles/web/node_modules"
 }
 
 # A volume inherited from an older image — or touched by a root-run npm/pnpm —
 # can still hold root-owned files. `dsh plugin` and the plugin market's own
-# installs run as node and would fail with EACCES, so repair the profile once
+# installs run as node and would fail with EACCES, so repair those trees once
 # per boot. `-h` rewrites symlink ownership without changing the image-owned
 # files the links point at.
-repair_dsh_volume_ownership() {
-  local profiles="$1"
-  [[ -d "$profiles" ]] || return 0
-  if [[ -n "$(find "$profiles" -xdev ! -type l ! -user node -print -quit 2>/dev/null)" ]]; then
-    chown -R -h node:node "$profiles"
+repair_ownership() {
+  local target="$1"
+  [[ -d "$target" ]] || return 0
+  if [[ -n "$(find "$target" -xdev ! -type l ! -user node -print -quit 2>/dev/null)" ]]; then
+    chown -R -h node:node "$target"
   fi
 }
 
@@ -45,18 +43,22 @@ if [[ "${1:-}" == "--self-test" ]]; then
   ! is_access_host 203.0.113.999
   ! is_access_host 0.0.0.0
   ! is_access_host 255.255.255.255
-  # The data volume must belong to node: both a fresh layout and a root-owned
-  # tree left by an older image have to come out node-owned.
+  # The data volume must belong to node: both a fresh layout and root-owned
+  # trees left by an older image have to come out node-owned.
   if [[ "$(id -u)" == 0 ]]; then
     fixture="$(mktemp -d)"
-    mkdir -p "$fixture/data/profiles/web/node_modules/@1panel"
+    mkdir -p "$fixture/data/profiles/web/node_modules" \
+      "$fixture/data/chrome-profile" "$fixture/data/home/.npm"
     printf '{}\n' > "$fixture/data/profiles/web/package.json"
     prepare_dsh_volume "$fixture/data"
-    repair_dsh_volume_ownership "$fixture/data/profiles"
-    for path in "$fixture/data" "$fixture/data/profiles" \
+    repair_ownership "$fixture/data/profiles"
+    repair_ownership "$fixture/data/chrome-profile"
+    repair_ownership "$fixture/data/home/.npm"
+    for path in "$fixture/data" "$fixture/data/home" "$fixture/data/pnpm-store" \
                 "$fixture/data/profiles/web" \
                 "$fixture/data/profiles/web/node_modules" \
-                "$fixture/data/profiles/web/package.json"; do
+                "$fixture/data/profiles/web/package.json" \
+                "$fixture/data/chrome-profile" "$fixture/data/home/.npm"; do
       if [[ "$(stat -c %U "$path")" != node ]]; then
         printf 'self-test: %s is not owned by node\n' "$path" >&2
         exit 1
@@ -73,15 +75,12 @@ printf '\033[1;36m%s\033[0m\n' 'https://github.com/1Panel-dev/1Panel/discussions
 
 # DSH_ACCESS_HOST is the host name browsers use to reach the deployment. It is
 # only used to fence the backend's /api requests; this container terminates no
-# TLS. HTTPS_ACCESS_HOST is accepted for compatibility with older deployments.
-access_host="${DSH_ACCESS_HOST:-${HTTPS_ACCESS_HOST:-}}"
-
-if [[ -z "${DSH_ACCESS_HOST:-}" && -n "${HTTPS_ACCESS_HOST:-}" ]]; then
-  printf 'HTTPS_ACCESS_HOST is deprecated; rename it to DSH_ACCESS_HOST (this container serves plain HTTP).\n' >&2
-fi
+# TLS. It is the only accepted form: the old Caddy variant's HTTPS_ACCESS_HOST
+# and DSH_AUTH_* settings are not read.
+access_host="${DSH_ACCESS_HOST:-}"
 
 if ! is_access_host "$access_host"; then
-  printf 'DSH_ACCESS_HOST must be an IPv4 address or hostname without a scheme, path, or port (wildcard/broadcast addresses are rejected).\n' >&2
+  printf 'DSH_ACCESS_HOST is required: an IPv4 address or hostname without a scheme, path, or port (wildcard/broadcast addresses are rejected).\n' >&2
   exit 1
 fi
 
@@ -89,20 +88,24 @@ if [[ "$access_host" == 127.* ]]; then
   printf 'Warning: DSH_ACCESS_HOST is a loopback address; the backend also trusts loopback Hosts, so the proxy Host allowlist adds nothing. Use the browser-facing host name.\n' >&2
 fi
 
-unset DSH_ACCESS_HOST HTTPS_ACCESS_HOST
+unset DSH_ACCESS_HOST
 
 install -d -m 0750 -o node -g node /workspace
 prepare_dsh_volume /data/dsh
-repair_dsh_volume_ownership /data/dsh/profiles
+# The profile and the desktop/package caches are written by DSH and the market
+# as node. Repair trees a previous image (or a root-run npm/pnpm) left behind;
+# image plugins themselves are loaded by absolute path (see the overlays), so
+# they never touch the data volume.
+repair_ownership /data/dsh/profiles
+repair_ownership /data/dsh/chrome-profile
+repair_ownership /data/dsh/home/.npm
+repair_ownership /data/dsh/home/.local/share/pnpm
 
 dsh_root=/usr/local/lib/node_modules/@deepseek-ai/dsh
-plugin_root=/opt/deepseek-harness/plugins/dsh-browser-desktop
 desktop_patch=/opt/deepseek-harness/web-desktop.cordis.patch.yml
 market_patch=/opt/deepseek-harness/web-market.cordis.patch.yml
 market_source="$dsh_root/node_modules/dshmarket"
-profile_dir=/data/dsh/profiles/web
-profile_manifest="$profile_dir/package.json"
-profile_modules="$profile_dir/node_modules"
+profile_manifest=/data/dsh/profiles/web/package.json
 desktop_enabled="${DSH_DESKTOP_ENABLED:-1}"
 
 # A profile install of the market (`dsh plugin add dshmarket`, which updates
@@ -115,49 +118,6 @@ if [[ -f "$profile_manifest" ]] && node -e '
   process.exit(Object.hasOwn(manifest.dependencies ?? {}, "dshmarket") ? 0 : 1);
 ' "$profile_manifest"; then
   market_declared=1
-fi
-
-# The desktop (and the two official Browser Use packages it shares Chromium
-# with) are image content, not profile dependencies: link them into the Web
-# profile before the profile tree is composed, so no network install runs at
-# boot. Ownership stays with `node` because the profile lives in the data
-# volume and `dsh plugin` must keep working on it.
-link_into_profile() {
-  local link="$1" source="$2" label="$3"
-  if [[ ! -e "$source" ]]; then
-    printf '%s is not installed in this image; skipping %s.\n' "$label" "$link" >&2
-    return 0
-  fi
-  install -d -m 0755 -o node -g node "$(dirname "$link")"
-  if [[ -L "$link" ]]; then
-    rm -f "$link"
-  elif [[ -e "$link" ]]; then
-    printf '%s path already exists; leaving it unchanged: %s\n' "$label" "$link" >&2
-    return 0
-  fi
-  ln -s "$source" "$link"
-}
-
-# Linked unconditionally: the patch entries are disabled at composition time by
-# DSH_DESKTOP_ENABLED=0, so a resolvable-but-disabled module is the safe state.
-link_into_profile "$profile_modules/@1panel/dsh-browser-desktop" \
-  "$plugin_root" 'browser desktop plugin'
-link_into_profile "$profile_modules/@deepseek-ai/dsh-browser-use" \
-  "$dsh_root/node_modules/@deepseek-ai/dsh-browser-use" 'official Browser Use service'
-link_into_profile "$profile_modules/@deepseek-ai/dsh-experimental-browser-use-playwright-mcp" \
-  "$dsh_root/node_modules/@deepseek-ai/dsh-experimental-browser-use-playwright-mcp" \
-  'official Playwright Browser Use provider'
-
-# The community plugin market is image content as well. A profile-installed
-# copy takes precedence (see market_declared above); only restore missing files
-# for such a profile from the image copy.
-if (( market_declared )); then
-  [[ -e "$profile_modules/dshmarket/package.json" ]] || \
-    link_into_profile "$profile_modules/dshmarket" "$market_source" \
-      'community plugin market (fallback for a broken profile dependency)'
-else
-  link_into_profile "$profile_modules/dshmarket" "$market_source" \
-    'community plugin market'
 fi
 
 pids=()

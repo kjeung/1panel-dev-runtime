@@ -269,3 +269,9 @@ bash -c 'source <(sed -n "4,12p" runtime/deepseek-harness/docker-entrypoint.sh);
 ## 8. 附：本次评审产生的证据文件（均在 gitignore 的 `.work/review-security/`，可复跑）
 
 `adv-http.mjs`（82 项）、`adv-edge.mjs`（28 项）、`adv-crash.mjs`（9 项）、`epipe2.mjs`、`ws-lib.mjs`、`halfclose.mjs`/`halfclose3.mjs`（半关闭对照）、`idle-timeout.mjs`、`reuse-stream.mjs`、`log-abort.mjs`/`log-abort2.mjs`、`entry-clean.sh`（入口脚本桩测）、`dsh-ws-probe.mjs`（真实 DSH 栅栏）、以及 `adv2.out`/`edge2.out`/`crash2.out` 原始输出。评审期间启动的 dsh/代理/假后端进程均已清理。
+
+---
+
+> **2026-11-03 更新**：P2-6 中"该包是否在本镜像 web profile 中启用未验证"已确认——镜像默认以内置
+> overlay 绝对路径挂载 dshmarket（见 ADR 0002），`node-proxy` 仍按 fail-closed 剥离 `X-Forwarded-*`
+> 并且不注入真实客户端 IP。

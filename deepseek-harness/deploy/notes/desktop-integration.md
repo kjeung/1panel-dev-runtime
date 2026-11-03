@@ -21,11 +21,15 @@
 
 ## 2. 已经在本机验证过的部分
 
+> 2026-11-03 更新：镜像插件（桌面、Browser Use、dshmarket）已从"启动时软链进 profile"改为
+> "overlay 行直接写镜像内绝对路径"。下表的验证记录保留为历史依据；新的验证方式见
+> [`../README.md`](../README.md) §10.7 与 `test-market.mjs`。
+
 本环境没有 Docker daemon，镜像构建只能在 CI / 目标主机上做。下列部分已在运行中的容器内实测：
 
 | 验证项 | 方式 | 结果 |
 | --- | --- | --- |
-| 插件在真实 DSH 中加载（非模拟） | 临时 `DSH_HOME` + 把插件软链进 `profiles/web/node_modules` + `dsh web --patch … --host 127.0.0.1 --port 3999` | 启动成功，日志无插件错误 |
+| 插件在真实 DSH 中加载（非模拟） | 临时 `DSH_HOME` + overlay 绝对路径 + `dsh web --patch … --host 127.0.0.1 --port 3999`（早期验证用 profile 软链，语义等价） | 启动成功，日志无插件错误 |
 | `/desktop/vnc.html` | 上述实例 `curl` | 200，`text/html`，带 ETag/nosniff |
 | `/desktop/core/rfb.js`、`/desktop/defaults.json` | 同上 | 200，类型正确 |
 | `/desktop`（无尾斜杠） | 同上 | 302 → `/desktop/vnc.html` |
@@ -40,7 +44,7 @@
 | `/browser-desktop/state` | 同上 | 返回同源 `desktop.path`（含 `path=/desktop/websockify`） |
 | `/browser-desktop/open` 同源校验 | 跨源 `Origin` POST | 403 |
 | cordis overlay 合成 | `dsh --profile web --patch … --dump-config` | 三个条目正确合入，`!!js` 表达式保留 |
-| 单元测试 | `node --test test-desktop.mjs`（14 例） | 全过 |
+| 单元测试 | `node --test test-desktop.mjs`（16 例） | 全过 |
 | 入口脚本 flag 顺序 | 实测 `dsh --patch … web` 会报 `--profile required` | 已改为 `dsh web --patch …` |
 
 ## 3. 只能在构建/部署环境验证的部分

@@ -40,6 +40,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Never let a manual input publish the plain-HTTP variant over the
+      # official Caddy/HTTPS image. This is a hard gate, not just a comment.
+      - name: Refuse to overwrite the official Caddy image
+        env:
+          IMAGE_NAME: ${{ inputs.imageName }}
+        run: |
+          if [ -z "$IMAGE_NAME" ]; then
+            echo "::error::imageName must not be empty"
+            exit 1
+          fi
+          case "$IMAGE_NAME" in
+            1panel/deepseek-harness|*/1panel/deepseek-harness)
+              echo "::error::refusing to publish the plain-HTTP variant to $IMAGE_NAME; use a separate repository (for example kjeung/deepseek-harness-plain)"
+              exit 1
+              ;;
+          esac
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 

@@ -120,3 +120,13 @@ environment:
 # 不要设置：DSH_WEB_URL、DSH_WEB_SEARCH_PROVIDER、DSH_WEB_FETCH_PROVIDER、DSH_GITHUB_TOKEN、
 #           DSH_SPEECH_TOKEN、DSH_BUNDLED_SKILL_DIR、任何 DSH_*__ 标记。
 ```
+
+## 九、2026-11-03 更新（镜像已内置 dshmarket）
+
+本文件其余部分是对上游 DSH / 旧镜像的审计记录。自插件市场提交起，镜像默认内置 `dshmarket`
+（交付方式见 ADR 0002），因此：
+
+- `DSH_MARKET_INSTALL_TIMEOUT_MS` / `DSH_MARKET_HOT_MOUNT_TIMEOUT_MS` 在本镜像中**适用**；
+- `DSH_GITHUB_TOKEN` 会被市场的 Gist 备份功能读取（仍不会注入 Agent shell，也不提供 git 私有仓库访问）；
+- 市场由 overlay 绝对路径挂载，默认开启，`DSH_MARKET_ENABLED=0` 只关闭入口；
+- 旧 Caddy 变体的 `HTTPS_ACCESS_HOST` / `DSH_AUTH_*` 已从本变体移除，入口只接受 `DSH_ACCESS_HOST`。

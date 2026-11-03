@@ -254,8 +254,9 @@ Traefik 排障要点：
 |---|---|---|---|
 | `DSH_ACCESS_HOST` | `dsh.example.com` / `203.0.113.10` | 无，必填 | 浏览器实际访问的 **IPv4 或主机名**。禁止 `https://`、端口、路径；不支持 IPv6、下划线、结尾点、前导零 IP；中文域名用 punycode。它同时是 dsh 的 `--trusted-host`（`/api` 的 Host 白名单）与转发进程的 Host 允许列表。**与实际访问地址不一致 → `/api` 返回 403 `forbidden`，页面白屏。** |
 
-旧版本用的 `HTTPS_ACCESS_HOST` 仍被接受：compose 会把它一并传给容器，入口脚本优先读
-`DSH_ACCESS_HOST`、回退到 `HTTPS_ACCESS_HOST` 并打印弃用提示。两者都填时以 `DSH_ACCESS_HOST` 为准。
+本变体只读取 `DSH_ACCESS_HOST`。旧 Caddy 变体的 `HTTPS_ACCESS_HOST`、`DSH_AUTH_USERNAME`、
+`DSH_AUTH_PASSWORD` 与 `/data/caddy` 已移除：它们不会被 compose 转发，也不会被入口脚本读取；
+旧 `.env` / compose 必须按本文档重写，不存在兼容回退。
 
 ### 3.2 镜像内置（一般不改）
 
@@ -456,7 +457,7 @@ API Key 是这条链路上受支持的等价入口。
 | `/data/dsh` | `profiles/`、`settings.yaml`、`.credentials.yaml`（API Key）、会话记录、`logs/`、`attachments/`、`HOME` | ✅ |
 | `/workspace` | Agent 工作区（`workspaceRoot`），项目代码 | ✅（业务数据） |
 
-`/data/caddy` 已不再使用（旧部署可以删除）。备份：
+备份：
 
 ```bash
 docker compose stop
@@ -472,9 +473,10 @@ docker compose up -d
 ```
 
 入口脚本每次启动会以 root 把这两个挂载点的**顶层**目录 chown 成 1000:1000 并设 0700/0750；
-此外会把 `/data/dsh/profiles` 整棵树修复成 `node` 属主（仅在发现非 `node` 文件时递归 chown，
-`-h` 不改镜像内容），保证 `dsh plugin` 与插件市场的安装能写 profile。NFS/SMB/只读卷无法 chown，
-会启动失败。
+此外会把 DSH 以 node 身份写入的目录（`/data/dsh/profiles`、`/data/dsh/chrome-profile`、
+`/data/dsh/home/.npm`、`/data/dsh/home/.local/share/pnpm`）在发现非 `node` 文件时递归 chown
+（`-h` 不改镜像内容），保证 `dsh plugin`、插件市场安装与桌面能正常工作。NFS/SMB/只读卷无法
+chown，会启动失败。
 
 ## 5. 运维
 
@@ -500,7 +502,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
   入口脚本先等 dsh 就绪（最多 60 s）再起转发，所以 compose 把 `start_period` 放宽到 180 s。
 - **进程模型**：`tini` 是 PID 1，dsh 与转发进程任一退出整个容器即退出 → `restart: unless-stopped` 必需。
 - **优雅退出**：SIGTERM → 转发进程立即停止接收新连接并断开 WebSocket，随后最多等 5 s 让普通响应/流收尾，然后退出 0；
-  `stop_grace_period: 30s` 足够。长时间运行的 Agent 任务会被中断（与旧镜像一致，重启前请确认没有关键任务）。
+  `stop_grace_period: 30s` 足够。长时间运行的 Agent 任务会被中断（重启前请确认没有关键任务）。
 - **升级（含 dsh 版本升级，务必看风险）**：只改小版本（同一 dsh）时 `docker compose build && docker compose up -d` 即可，升级前备份。
   升级 **dsh 版本**不是改个数字：镜像构建期补丁用精确字符串匹配 DSH 的 `isAuthenticated()`、Web index 的 manifest link 与 HMR SSE 的 close handler，DSH 源码一变构建就会失败；
   DSH 的 WebSocket 路径、`/api` 栅栏、gzip、300 MiB 上限也可能变化。完整清单见
@@ -551,26 +553,28 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 8. `gh` 的 token（`/data/dsh/home/.config/gh/hosts.yml`）与 DSH 的 `.credentials.yaml` 都在 `/data/dsh`；
    能读该卷的人或 Agent 等于拿到这些凭据，请按 root 级敏感数据保护。
 
-## 8. 与旧镜像（Caddy 版）的差异
+## 8. 与旧 Caddy 变体的关系（不兼容）
 
-| 项 | 旧镜像 | 现在 |
+本变体**不是**旧 `1panel/deepseek-harness`（Caddy + TLS + basic_auth）的兼容升级：容器内的
+TLS 与认证被删除，统一交给外部反向代理；端口从 8443 变为 8080；环境变量只剩本文档列出的项。
+旧变体的 `HTTPS_ACCESS_HOST`、`DSH_AUTH_USERNAME`、`DSH_AUTH_PASSWORD` 与 `/data/caddy`
+均不再读取或创建，也没有兼容回退——沿用旧配置启动不会得到旧行为。
+
+| 项 | 旧 Caddy 变体 | 本变体 |
 |---|---|---|
 | 认证 | Caddy `basic_auth` + 入口校验 | 无（外部反代负责） |
 | TLS | Caddy `tls internal`，8443 | 无，容器内 HTTP 8080 |
-| 反向代理 | Caddy | `node-proxy.mjs`（约 490 行，只用 Node 内置模块，无第三方依赖） |
-| 证书/CA | `/data/caddy` 卷 + 导入 root.crt | 不再需要（旧卷可删） |
-| 环境变量 | `HTTPS_ACCESS_HOST` + `DSH_AUTH_USERNAME` + `DSH_AUTH_PASSWORD` | 仅 `DSH_ACCESS_HOST`（compose 同时转发旧的 `HTTPS_ACCESS_HOST`） |
+| 反向代理 | Caddy | `node-proxy.mjs`（只用 Node 内置模块，无第三方依赖） |
 | 健康检查 | `curl 127.0.0.1:3080/` | `curl 127.0.0.1:8080/healthz`（同时验证后端） |
 | 访问日志 | 无 | JSON 行（可关）：时间、来源（**反代地址**，不是真实客户端 IP）、方法、pathname（不含 query）、状态、耗时、字节，WebSocket 升级也记一条 |
 | 安全响应头 | Caddy 注入 `nosniff` / `Referrer-Policy` | 转发进程注入同样两个头 |
 | 跨站 `/api` 403 | Caddy `@unsafe_api` | DSH 原生 Host/Origin 栅栏（等价且多一层 Host 白名单） |
 | settings 端点 | Caddy 改写 Host/删 Origin | 原样透传（实测无需改写） |
 
-> 升级到本版本后，`/data/dsh` 与 `/workspace` 原样复用，会话、设置、API Key 都保留。
-
 **发布标签**：本变体与 Caddy 版行为不同，**不要**推到 `1panel/deepseek-harness:<版本>` 或 `:latest`。
 本仓库工作流默认发布到 `kjeung/deepseek-harness-plain`（`:<dshVersion>` + `:plain` 别名，
-一次构建、多 tag 同 digest）；自有仓库请用 `imageName` 输入覆盖。
+一次构建、多 tag 同 digest）；工作流会拒绝官方镜像名（见 `.github/workflows/deepseek-harness-release.yml`），
+自有仓库请用 `imageName` 输入覆盖。
 
 ## 9. 已知限制
 
@@ -692,7 +696,7 @@ curl -i -N -H 'Host: dsh.example.com' -H 'Origin: https://dsh.example.com' \
 | noVNC 资源 | Debian `novnc` 包 | 固定 1.6.0，镜像内置（bookworm 的 1.3.0 需要显式 host） |
 | 面板 URL | 改端口（`desktopPort`） | 同源路径，无端口概念 |
 | 认证 | DSH 自身 token/cookie 或 Caddy LAN 网关 | 外部反代（与本镜像既有模型一致） |
-| 插件市场 | 独立的 `Dockerfile.market` 变体（构建期装 dshmarket，启动时软链，`allowRestart:false`） | 默认内置（同机制），`DSH_MARKET_ENABLED=0` 可关闭 |
+| 插件市场 | 独立的 `Dockerfile.market` 变体（构建期装 dshmarket，约定为 profile 层，`allowRestart:false`） | 默认内置，overlay 以绝对路径挂载，`DSH_MARKET_ENABLED=0` 可关闭 |
 
 ### 10.6 Browser Use 的两个限制
 
@@ -713,16 +717,20 @@ curl -i -N -H 'Host: dsh.example.com' -H 'Origin: https://dsh.example.com' \
 版本由构建参数 `DSH_MARKET_VERSION` 固定（默认 `1.73.9`）。它提供目录浏览/搜索、一键安装与更新、
 收藏、分组、主题等能力，入口在 DSH 的**插件**页（插件市场页签；也可在侧边栏加一行）。
 
-**交付方式：镜像内容 + profile 软链**（与 browser-use 同策略）。构建期把 dshmarket 装进 DSH
-安装目录（`…/dsh/node_modules/dshmarket`）；启动时 entrypoint 软链到
-`/data/dsh/profiles/web/node_modules/dshmarket`，再由 `web-market.cordis.patch.yml` 插入
-`dsh-market` 行。数据卷只保留用户态：
+**交付方式：镜像内容 + overlay 绝对路径。** 构建期把 dshmarket 装进 DSH 安装目录
+（`…/dsh/node_modules/dshmarket`），`web-market.cordis.patch.yml` 用绝对路径行直接挂载：
+Cordis loader 接受路径行，客户端 roster 从该文件最近的 `package.json` 读取 `dsh.client`，
+因此**不需要把镜像内容软链进数据卷的 profile**（桌面与 Browser Use 也改为同一方式）。
+数据卷只保留用户态：
 
 | 内容 | 位置 | 容器重建后 |
 |---|---|---|
 | 市场本体 | 镜像层 | 随镜像（升级市场 = 重建镜像） |
 | 社区插件、收藏/分组/备注（`state.json`） | `/data/dsh/profiles/web/…` | 保留 |
 | pnpm store（市场与 `dsh plugin` 共用） | `/data/dsh/pnpm-store`（node 属主） | 保留 |
+
+> 镜像插件不再依赖 profile 可写；profile 的 node 属主只在 `dsh plugin` / 市场安装社区插件时需要。
+> 入口脚本仍会修复旧卷里被 root 写脏的 profile、chrome-profile 与 npm/pnpm 缓存。
 
 **与 profile 安装的关系。** 如果卷里曾执行过 `dsh plugin --profile web add dshmarket`，profile 副本
 优先：entrypoint 检测到 `package.json.dependencies.dshmarket` 后不再追加镜像的 `dsh-market` 行
@@ -742,11 +750,11 @@ docker compose restart
 docker compose exec -T deepseek-harness \
   curl -fsS http://127.0.0.1:3080/dsh-market/status
 
-# profile 软链与数据卷属主：市场装社区插件的前提
+# overlay 行确实指向镜像内的绝对路径，且数据卷目录归 node（装社区插件的前提）
 docker compose exec -T deepseek-harness \
-  readlink /data/dsh/profiles/web/node_modules/dshmarket
-docker compose exec -T deepseek-harness \
-  stat -c '%U:%G %n' /data/dsh/profiles/web/node_modules
+  sed -n '/id: dsh-market/,/allowRestart/p' /opt/deepseek-harness/web-market.cordis.patch.yml
+docker compose exec -T deepseek-harness sh -c \
+  'stat -c "%U:%G %n" /data/dsh/profiles /data/dsh/chrome-profile 2>/dev/null || true'
 ```
 
 **安全**：社区插件在 DSH 宿主进程内执行，权限与 owner 相同（可读 `/data/dsh` 凭据、写 `/workspace`）。
@@ -778,7 +786,7 @@ docker compose exec -T deepseek-harness \
 | `../plugins/dsh-browser-desktop/` | noVNC 静态服务 + RFB WebSocket 桥接 + `browser_open` + 面板 |
 | `../web-desktop.cordis.patch.yml` | 把桌面与 Browser Use 插件插入 web profile 的 overlay |
 | `../web-market.cordis.patch.yml` | 把镜像内置的 dshmarket 插入 web profile 的 overlay（`DSH_MARKET_ENABLED` 控制） |
-| `../test-market.mjs` | 构建期测试：包身份、客户端声明、profile 软链解析、overlay 行 |
+| `../test-market.mjs` | 构建期测试：包身份、客户端声明、overlay 绝对路径与镜像内文件存在性 |
 | [`../../docs/adr/0001-browser-desktop-access.md`](../../docs/adr/0001-browser-desktop-access.md) | 桌面访问方式（子域名/子路径/端口）的论证与决定 |
 | [`../../docs/adr/0002-plugin-market-delivery.md`](../../docs/adr/0002-plugin-market-delivery.md) | 插件市场交付方式（镜像内容 vs 运行时安装）与数据卷属主修复的论证 |
 | [`notes/desktop-integration.md`](notes/desktop-integration.md) | 上游映射、已验证/未验证项、构建后 runbook、风险清单 |
@@ -790,5 +798,5 @@ docker compose exec -T deepseek-harness \
 Authorization 剥除、安全头注入、Host 白名单 403、流式不缓冲、WebSocket 101、502、共享密钥、
 健康检查、4 MB 上传）；`node --test test-desktop.mjs` 覆盖桌面（路径几何、静态资源越权、
 帧编解码、真实 WebSocket↔TCP 桥接、路由注册）；`node --test test-market.mjs` 覆盖插件市场
-（包身份与 bundle 声明、Web 客户端声明、profile 软链解析、overlay 行与 `DSH_MARKET_ENABLED`）。
-入口脚本的 `--self-test` 还会验证数据卷目录在新卷与 root 属主旧卷两种情况下都归 `node`。
+（包身份与 bundle 声明、Web 客户端声明、overlay 绝对路径与镜像内文件存在性、`DSH_MARKET_ENABLED`）。
+入口脚本的 `--self-test` 还会验证数据卷目录与属主修复（新卷与 root 属主旧卷两种输入）。
