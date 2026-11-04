@@ -1,0 +1,45 @@
+{
+  "name": "@1panel/dsh-ctrl-enter-send",
+  "version": "0.1.0",
+  "description": "Sends composer messages with Ctrl/Cmd+Enter and makes plain Enter insert a line break.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "files": [
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "index.js",
+    "locale/*.json",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "composer",
+    "keyboard",
+    "ctrl-enter"
+  ],
+  "engines": {
+    "node": ">=22.19"
+  }
+}
