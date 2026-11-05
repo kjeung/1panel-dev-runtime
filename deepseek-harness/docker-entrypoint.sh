@@ -35,6 +35,33 @@ repair_ownership() {
   fi
 }
 
+# This image moves DSH's data volume to /data/dsh, but a plugin that enumerates
+# the skills it ships looks them up under `$HOME/.dsh/profiles/<profile>/...`,
+# which is the *default* DSH_HOME layout and therefore absent here. A provider
+# that cannot find that path skips itself silently, leaving the skill-missing
+# banner up even though the plugin is installed and healthy.
+#
+# Anchor `$HOME/.dsh/profiles` onto the real volume with a symlink rather than a
+# second directory: the profile must stay single-instance (one install, one
+# plugin set), and `repair_ownership` skips symlinks (`! -type l`), so this link
+# is never rewritten to point elsewhere.
+ensure_profile_anchor() {
+  local data_root="$1" home_root="$2"
+  local anchor="$home_root/.dsh"
+  local target="$data_root/profiles"
+  [[ -d "$target" ]] || return 0
+  install -d -m 0750 -o node -g node "$anchor"
+  if [[ -L "$anchor/profiles" ]]; then
+    [[ "$(readlink "$anchor/profiles")" == "$target" ]] && return 0
+    rm -f "$anchor/profiles"
+  elif [[ -e "$anchor/profiles" ]]; then
+    # A real directory here is a stale copy from an older boot; the volume copy
+    # is the one DSH actually writes, so replace it rather than diverge.
+    rm -rf "$anchor/profiles"
+  fi
+  ln -s "$target" "$anchor/profiles"
+}
+
 if [[ "${1:-}" == "--self-test" ]]; then
   is_access_host 203.0.113.10
   is_access_host dsh.example.com
@@ -66,6 +93,21 @@ if [[ "${1:-}" == "--self-test" ]]; then
     done
     rm -rf "$fixture"
   fi
+  # The image pins DSH_HOME to /data/dsh, but plugins that enumerate their
+  # bundled skills look under `$HOME/.dsh/profiles/<profile>/node_modules/...`.
+  # Anchoring that path is what keeps such a provider from silently skipping
+  # itself. Assert the exact candidate path a plugin would probe resolves.
+  anchor_fixture="$(mktemp -d)"
+  install -d -m 0700 -o node -g node "$anchor_fixture/data" "$anchor_fixture/home"
+  install -d -m 0750 -o node -g node \
+    "$anchor_fixture/data/profiles/web/node_modules/dsh-mattpocock-skills-deck/bundled-skills/wayfinder"
+  ensure_profile_anchor "$anchor_fixture/data" "$anchor_fixture/home"
+  anchor_candidate="$anchor_fixture/home/.dsh/profiles/web/node_modules/dsh-mattpocock-skills-deck/bundled-skills/wayfinder"
+  if [[ ! -d "$anchor_candidate" ]]; then
+    printf 'self-test: the profile anchor does not resolve (%s)\n' "$anchor_candidate" >&2
+    exit 1
+  fi
+  rm -rf "$anchor_fixture"
   exit 0
 fi
 
@@ -100,6 +142,9 @@ repair_ownership /data/dsh/profiles
 repair_ownership /data/dsh/chrome-profile
 repair_ownership /data/dsh/home/.npm
 repair_ownership /data/dsh/home/.local/share/pnpm
+# Plugins look for their bundled skills under `$HOME/.dsh/profiles`; anchor that
+# onto the real volume so a provider does not silently skip itself.
+ensure_profile_anchor /data/dsh /data/dsh/home
 
 dsh_root=/usr/local/lib/node_modules/@deepseek-ai/dsh
 desktop_patch=/opt/deepseek-harness/web-desktop.cordis.patch.yml
