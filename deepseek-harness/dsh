@@ -1,11 +1,21 @@
 #!/bin/sh
+# Launcher used by `docker compose exec … dsh …`.
+#
+# HOME is pinned to /home/node: the same path /etc/passwd records for `node`, and
+# the mount point of the data volume (ADR 0004). Sharing one path between $HOME
+# and the passwd home keeps tools that read $HOME (DSH, git, gh, pnpm) and tools
+# that resolve `~` through getpwuid() (ssh, ssh-keygen, ssh-copy-id, scp) on the
+# same directory. The image ENV also sets HOME, so this exists for the case where
+# an exec passes a different HOME explicitly.
+#
+# DSH_HOME is deliberately left unset so DSH derives `$HOME/.dsh` itself — the
+# layout its own defaults and the plugin ecosystem assume.
 set -eu
 
 if [ "$(id -u)" -eq 0 ]; then
-  exec gosu node env HOME=/data/dsh/home DSH_HOME=/data/dsh \
+  exec gosu node env HOME=/home/node \
     node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js "$@"
 fi
 
-export HOME=/data/dsh/home
-export DSH_HOME=/data/dsh
+export HOME=/home/node
 exec node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js "$@"

@@ -44,20 +44,21 @@ RUN apt-get update && \
 COPY --from=caddy /usr/bin/caddy /usr/bin/caddy
 COPY --from=dsh-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 
+# The data root is the `node` user's OS home (/home/node), which is also the
+# home recorded in /etc/passwd. Keeping the two identical is the whole point
+# (ADR 0004): Node, git, gh and pnpm expand `~` from $HOME, while ssh, ssh-keygen,
+# ssh-copy-id and scp resolve it through getpwuid() and ignore $HOME. A single
+# path serves both, so a mounted volume holds every tool's state.
 RUN node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
       --help >/dev/null && \
-    groupadd --system --gid 1001 caddy && \
-    useradd --system --uid 1001 --gid caddy --home-dir /var/lib/caddy \
-      --create-home --shell /usr/sbin/nologin caddy && \
-    install -d -m 0700 -o node -g node /data/dsh /data/dsh/home && \
-    install -d -m 0750 -o node -g node /workspace && \
-    install -d -m 0700 -o caddy -g caddy /data/caddy /data/caddy/config
+    install -d -m 0700 -o node -g node /home/node && \
+    install -d -m 0750 -o node -g node /workspace
 
 RUN npm install --global "pnpm@${PNPM_VERSION}" && \
     npm cache clean --force && \
-    test "$(gosu node env HOME=/data/dsh/home pnpm --version)" = "$PNPM_VERSION"
+    test "$(gosu node env HOME=/home/node pnpm --version)" = "$PNPM_VERSION"
 
-COPY deepseek-harness/Caddyfile /etc/caddy/Caddyfile
+RUN install -d -m 0755 /opt/deepseek-harness && \
 COPY deepseek-harness/node-proxy.mjs /usr/local/bin/dsh-node-proxy
 COPY deepseek-harness/dsh /usr/local/bin/dsh
 COPY deepseek-harness/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
@@ -73,8 +74,21 @@ RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh && \
         web --patch /opt/deepseek-harness/web-desktop.cordis.patch.yml \
             --patch /opt/deepseek-harness/web-market.cordis.patch.yml \
 
-ENV DSH_HOME=/data/dsh \
-    DSH_TELEMETRY_DISABLED=1
+# DSH_HOME is deliberately NOT set: DSH then derives `$HOME/.dsh`, which is the
+# layout its own defaults and the plugin ecosystem assume (see ADR 0003).
+#
+# HOME is set explicitly (ADR 0004). It equals the passwd home of `node`, so
+# tools that read $HOME (DSH, git, gh, pnpm) and tools that resolve the home
+# through getpwuid() (ssh, ssh-keygen, ssh-copy-id, scp, sftp) land on the same
+# directory. It also makes a bare `docker exec ... bash` inherit the right home
+# instead of the passwd default, so ad-hoc commands never write to a stale path.
+#
+# The XDG_* cache/config/data paths are left at their defaults for the same
+# reason: with HOME=/home/node they already resolve inside the home directory
+# (`~/.cache`, `~/.config`, `~/.local/share`), and spelling them out only adds
+ENV HOME=/home/node \
+    DSH_TELEMETRY_DISABLED=1 \
+    DSH_NOVNC_VERSION=${NOVNC_VERSION} \
 
 WORKDIR /workspace
 
