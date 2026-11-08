@@ -1,0 +1,184 @@
+# =============================================================================
+# DeepSeek Harness —— 本机覆盖模板
+#
+# 复制成 docker-compose.local.yml 后按需取消注释：
+#
+#   cp docker-compose.local.yml.example docker-compose.local.yml
+#
+# 为什么要有这个文件：
+#   docker-compose.yml / docker-compose.traefik.yml 是入库文件，`git pull` 时如果
+#   你本机也改过它们，就会 stash/pop 冲突。把"本机才有的差异"放在这里，入库文件保持
+#   原样，pull 就永远不会再冲突。docker-compose.local.yml 已被 deploy/.gitignore 忽略。
+#
+# 用法（关键：一旦用了 -f，Compose 不再自动加载 override，必须把它也显式列出，
+#       并且放在最后，本文件的覆盖才会生效）：
+#
+#   docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
+#                  -f docker-compose.local.yml up -d --build
+#
+# 约定：
+#   - 默认全部注释，只取消你要改的项；本文件保持合法，复制即可用。
+#   - 变量值优先写 .env（compose 自动读取，基础文件已转发大部分变量）。
+#     只有"基础文件没有转发的变量"才需要写在本文件的 environment 里，二者别重复。
+#
+# 为什么这里只写差异、不抄 docker-compose.yml / docker-compose.traefik.yml 的全文：
+#   compose 的 -f 是"层层叠加"（mapping 按 key 合并、sequence 追加、标量后者覆盖），
+#   入库文件仍然参与合并，所以本文件不需要重复它们的完整内容。
+#   如果你确实需要"单文件自包含"（例如某个平台只接受一个 compose 文件），不要手工维护
+#   副本，用合并结果生成快照：
+#
+#     docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
+#                    -f docker-compose.local.yml config > merged.yml
+#
+#   注意 config 会做变量插值（快照里会有真实密钥，别提交/外传），并已应用 !reset；
+#   它不会随 git pull 更新，上游改了 compose 需要重新生成——这也是默认用差异文件的理由。
+# =============================================================================
+
+services:
+  deepseek-harness:
+    # 与基础文件一致，仅作为本文件"全注释时仍然合法"的锚点。
+    restart: unless-stopped
+
+    # ---- 容器名 ----
+    # 只改 container_name，**不要改 service 名**（`deepseek-harness`）：Traefik 回源地址
+    # `http://deepseek-harness:8080`、文档里的 `docker compose exec -T deepseek-harness …`
+    # 用的都是 service 名，改它会让反代和运维命令一起失效。
+    # container_name 是标量覆盖，直接写新名字即可（本部署是单实例，不用考虑 --scale）：
+    # container_name: dsh-prod
+    #
+    # 想改回 Compose 自动命名（多环境/多实例并存时更合适，配合下面的顶层 name:）：
+    # container_name: !reset null
+    #
+    # 改名后必须重建，否则旧名字的容器会残留：
+    #   docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
+    #                  -f docker-compose.local.yml down
+    #   … up -d --build
+
+    # ---- 网络（服务级）----
+    # 追加语义：写在这里的网络会与 docker-compose.traefik.yml 里的 traefik 并存，
+    # 不会替换它。新增的 key 必须在顶层 networks: 里有定义，否则 compose 报未定义。
+    # networks:
+    #   - traefik
+    #   - monitoring
+
+    environment:
+      # 镜像默认值（DSH_TELEMETRY_DISABLED=1，任意非空都表示关闭遥测）。写出来只是让
+      # 这一节的 environment 保持合法；把它改成别的值也不会“打开”遥测。
+      DSH_TELEMETRY_DISABLED: "1"
+
+      # ---- 基础文件没有转发、需要时只能在这里补的变量 ----
+
+      # 沙箱/审批档位：read-only | workspace-write（默认）| danger-full-access
+      # DSH_PERMISSION_MODE: workspace-write
+      # 工具协议：native（默认）| ptc
+      # DSH_TOOLS_MODE: native
+
+      # 模型凭据（也可以在 Web UI 的 Settings → Models 里填；UI 保存的优先级更高）
+      # DEEPSEEK_API_KEY: sk-xxxxxxxxxxxxxxxx
+      # DEEPSEEK_BASE_URL: https://api.deepseek.com/anthropic
+
+      # 容器出网代理（不支持 SOCKS）
+      # HTTP_PROXY: http://10.0.0.2:3128
+      # HTTPS_PROXY: http://10.0.0.2:3128
+      # NO_PROXY: localhost,127.0.0.1,.internal
+
+      # 时区：影响日志时间戳与桌面浏览器时区（默认 UTC）
+      # TZ: Asia/Shanghai
+
+      # ---- 如果你不建 .env，这些"基础文件已转发"的变量也可以写在这里 ----
+      # 但不要和 .env 重复；两处都有时以本文件为准。
+      # DSH_ACCESS_HOST: dsh.dh.ci
+      # PROXY_SHARED_SECRET: "change-me"
+      # PROXY_ACCESS_LOG: "1"
+      # DSH_DESKTOP_ENABLED: "1"
+      # DSH_BROWSER_USE_ENABLED: "1"
+      # DSH_DESKTOP_WIDTH: "1440"
+      # DSH_DESKTOP_HEIGHT: "900"
+      # DSH_DESKTOP_DEPTH: "24"
+      # CHROME_USER_DATA_DIR: /home/node/chrome-profile
+
+    # ---- 端口 ----
+    # 默认只发布到宿主机回环 127.0.0.1:8080。
+    # 注意：ports 的唯一键是 {ip, target, published, protocol}，直接写新端口是"追加"
+    # 而不是替换（8080 和 8081 会同时发布）。换端口要用 !override 整体替换
+    # （Compose >= 2.24.4）：
+    # ports: !override
+    #   - "127.0.0.1:8081:8080"
+    # 完全不发布（反代与容器同 docker 网络）时清空即可（Compose >= 2.24）：
+    # ports: !reset []
+
+    # ---- 数据目录 ----
+    # 默认 ./data/home 与 ./workspace（相对 deploy/）。改用绝对路径或独立磁盘：
+    # 注意挂载点是 /home/node —— 那是 node 用户的 passwd home，也是所有工具
+    # （DSH、git、gh、ssh 系）共用的用户态根（ADR 0004）。
+    # volumes:
+    #   - /srv/dsh/home:/home/node
+    #   - /srv/dsh/workspace:/workspace
+    # 需要额外挂载时追加（Agent 在 /workspace 内默认可写可执行，别挂敏感目录）：
+    #   - /srv/dsh/extra:/workspace/extra:ro
+
+    # ---- 资源 ----
+    # shm_size: "2gb"       # 桌面分辨率高 / 页面复杂时加大；默认基础文件为 1gb
+    # pids_limit: 1024      # Chromium 进程较多，默认不限制
+    # mem_limit: 8g
+    # cpus: "4.0"
+
+    # ---- 日志 ----
+    # logging:
+    #   driver: json-file
+    #   options:
+    #     max-size: "20m"
+    #     max-file: "5"
+
+    # ---- 网络 ----
+    # 服务的 networks 是追加语义；新网络必须在顶层 networks: 里声明，否则 compose 报错。
+    # 例：接入一个已存在的监控网络
+    # networks:
+    #   - traefik
+    #   - monitoring
+
+    # ---- 其它 ----
+    # 访问宿主机上的服务（例如宿主机代理）：
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    #
+    # 改用已构建镜像：基础文件里有 build: 段，需要 Compose >= 2.24 才能整体移除，
+    # 旧版本只能直接注释掉基础文件的 build/pull_policy 两段。
+    # image: registry.example.com/deepseek-harness-plain:0.2.1-rc.5
+    # pull_policy: never
+    # build: !reset null
+
+# ---- 顶层 networks ----
+# mapping 按 key 合并：同名 key 会覆盖/补全入库文件里的定义。
+# external 网络必须已经存在（compose 不会替你创建），先确认名字：
+#   docker network ls
+#
+# 1) 你的 Traefik 实际接入的网络叫 `proxy` 之类时，用这里改掉入库的 `traefik` 网络名
+#    （服务级不用动：docker-compose.traefik.yml 已经把它挂上去了）：
+# networks:
+#   traefik:
+#     external: true
+#     name: proxy
+#
+# 2) 再额外接入一个已存在的网络时，顶层写它的定义，同时把 key 加到服务级 networks 列表：
+# networks:
+#   traefik:
+#     external: true
+#     name: proxy
+#   monitoring:
+#     external: true
+#     name: monitoring
+#
+# 3) 如果你干脆不用 docker-compose.traefik.yml（只用 base + local），那 local 里要自己
+#    完成它做过的事：服务级 networks 列表 + 顶层网络定义，并可选地清掉发布端口：
+# networks:
+#   proxy:
+#     external: true
+#     name: proxy
+# 服务级：
+#   networks: [proxy]
+#   ports: !reset []
+#
+# 4) 顶层 name: 决定 project 名（默认 deepseek-harness），影响容器/网络/数据卷的归属；
+#    改它等于换一个 project，旧的容器与卷不会自动清理：
+# name: dsh-prod
