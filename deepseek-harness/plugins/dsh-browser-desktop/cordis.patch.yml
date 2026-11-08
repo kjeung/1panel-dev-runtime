@@ -1,0 +1,5 @@
+# Bundle patch used by `dsh plugin add`; this image instead loads the plugin
+# through the --patch overlay that the entrypoint passes to `dsh web`.
+- insert:
+    - id: browser-desktop
+      name: '@1panel/dsh-browser-desktop'

@@ -152,7 +152,10 @@ repair_ownership "$home_root/.local/share/pnpm"
 repair_ownership "$home_root/.ssh"
 
 dsh_root=/usr/local/lib/node_modules/@deepseek-ai/dsh
+desktop_patch=/opt/deepseek-harness/web-desktop.cordis.patch.yml
 profile_manifest="$dsh_home/profiles/web/package.json"
+desktop_enabled="${DSH_DESKTOP_ENABLED:-1}"
+
 fi
 
 password_hash="$(caddy hash-password --algorithm argon2id --plaintext "$auth_password")"
@@ -163,6 +166,7 @@ install -d -m 0750 -o node -g node /workspace
 install -d -m 0700 -o caddy -g caddy /data/caddy /data/caddy/config
 
 pids=()
+desktop_pid=""
 cleanup() {
   if (( ${#pids[@]} )); then
     kill -TERM "${pids[@]}" 2>/dev/null || true
@@ -173,6 +177,13 @@ trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
+# The profile name comes first, then the launcher's --patch overlay (composed
+# after the profile's own layer), then the Web app's own flags. Putting --patch
+# before the profile name makes the launcher demand an explicit --profile.
+dsh_args=(web)
+if [[ -f "$desktop_patch" ]]; then
+  dsh_args+=(--patch "$desktop_patch")
+fi
 # DSH_HOME is intentionally omitted so DSH derives `$HOME/.dsh`; both the
 # launcher and everything it spawns then agree on one data root (ADR 0003).
 gosu node env \
@@ -184,7 +195,16 @@ gosu node env \
 dsh_pid=$!
 pids+=("$dsh_pid")
 
+if [[ "$desktop_enabled" != "0" ]]; then
+  # Chromium keeps its profile in the data volume, so logins and downloads
+  # survive a container upgrade.
+  export CHROME_USER_DATA_DIR="${CHROME_USER_DATA_DIR:-$chrome_profile}"
   gosu node env HOME="$home_root" \
+    /usr/local/bin/dsh-desktop-supervisor &
+  desktop_pid=$!
+  pids+=("$desktop_pid")
+fi
+
 ready=false
 for _ in {1..60}; do
   if curl -fsS --noproxy '*' --max-time 2 http://127.0.0.1:3080/ >/dev/null 2>&1; then
@@ -195,6 +215,10 @@ for _ in {1..60}; do
     wait "$dsh_pid"
     exit $?
   fi
+  if [[ -n "$desktop_pid" ]] && ! kill -0 "$desktop_pid" 2>/dev/null; then
+    wait "$desktop_pid" || true
+    printf 'The desktop supervisor exited during startup; check the container log and /tmp/dsh-desktop/.\n' >&2
+    exit 1
   fi
   sleep 1
 done
@@ -204,15 +228,7 @@ if [[ "$ready" != true ]]; then
   exit 1
 fi
 
-gosu caddy env \
-  XDG_DATA_HOME=/data/caddy \
-  XDG_CONFIG_HOME=/data/caddy/config \
-  CADDY_ACCESS_HOST="$access_host" \
-  DSH_AUTH_USERNAME="$auth_username" \
-  DSH_AUTH_PASSWORD_HASH="$password_hash" \
-  caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
-caddy_pid=$!
-pids+=("$caddy_pid")
+gosu node env \
   HOME="$home_root" \
   PROXY_LISTEN_HOST=0.0.0.0 \
   PROXY_LISTEN_PORT=8080 \
@@ -223,8 +239,16 @@ pids+=("$proxy_pid")
 
 printf 'DeepSeek Harness is available at http://%s:8080 inside the container (plain HTTP).\n' "$access_host"
 printf 'This container performs no TLS and no authentication: restrict port 8080 to the trusted reverse proxy.\n'
+if [[ -n "$desktop_pid" ]]; then
+  printf 'The Chromium desktop is served on the same origin at /desktop/ (RFB bridged to 127.0.0.1:5900).\n'
+fi
+
 wait_pids=("$dsh_pid" "$proxy_pid")
+if [[ -n "$desktop_pid" ]]; then
+  # A dead desktop supervisor must recycle the container, not linger silently.
+  wait_pids+=("$desktop_pid")
+fi
 
 status=0
-wait -n "$dsh_pid" "$caddy_pid" || status=$?
+wait -n "${wait_pids[@]}" || status=$?
 exit "$status"

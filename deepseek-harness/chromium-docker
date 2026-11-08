@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+# Chromium refuses to start without a usable sandbox, and this image has none:
+# the setuid `chromium-sandbox` helper is deliberately not installed and the
+# container gives the unprivileged `node` user no usable user namespace, so the
+# binary reports "No usable sandbox!". Keep the exception scoped to the browser
+# process launched here instead of weakening the container for everything else.
+# The reference compose also sets `no-new-privileges`, which would block the
+# setuid-helper route anyway: the two options are mutually exclusive.
+set -- --no-sandbox "$@"
+
+# Chromium's renderer allocates shared memory in /dev/shm. Docker's 64 MiB
+# default is too small for real pages and surfaces as renderer crashes, so fall
+# back to disk-backed shared memory unless the operator enlarged it.
+shm_total_kb=$(df -k /dev/shm 2>/dev/null | awk 'NR == 2 { print $2 }')
+if [ -z "${shm_total_kb}" ] || [ "${shm_total_kb}" -lt 262144 ]; then
+  set -- --disable-dev-shm-usage "$@"
+fi
+
+exec /usr/bin/chromium "$@"
