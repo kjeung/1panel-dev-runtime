@@ -60,6 +60,18 @@ if [[ "${1:-}" == "--self-test" ]]; then
   ! is_access_host 203.0.113.999
   ! is_access_host 0.0.0.0
   ! is_access_host 255.255.255.255
+  # The vendored composer plugin is image content loaded by an absolute-path
+  # overlay. Assert both halves exist here, so dropping either the COPY of the
+  # plugin or of its overlay fails at build time instead of shipping an image
+  # whose composer keeps plain Enter sending.
+  ctrl_plugin_dir=/opt/deepseek-harness/plugins/dsh-ctrl-enter-send
+  ctrl_overlay=/opt/deepseek-harness/web-ctrl-enter-send.cordis.patch.yml
+  for required in "$ctrl_plugin_dir/index.js" "$ctrl_plugin_dir/package.json" "$ctrl_overlay"; do
+    if [[ ! -f "$required" ]]; then
+      printf 'self-test: the Ctrl+Enter plugin overlay is incomplete (%s)\n' "$required" >&2
+      exit 1
+    fi
+  done
   # ADR 0004: the home must be the one /etc/passwd records for `node`. ssh and
   # its relatives resolve `~` through getpwuid() and ignore $HOME, so drifting
   # apart by even one path segment would put keys and known_hosts outside the
@@ -154,7 +166,9 @@ repair_ownership "$home_root/.ssh"
 dsh_root=/usr/local/lib/node_modules/@deepseek-ai/dsh
 desktop_patch=/opt/deepseek-harness/web-desktop.cordis.patch.yml
 market_patch=/opt/deepseek-harness/web-market.cordis.patch.yml
+ctrl_patch=/opt/deepseek-harness/web-ctrl-enter-send.cordis.patch.yml
 market_source="$dsh_root/node_modules/dshmarket"
+ctrl_source=/opt/deepseek-harness/plugins/dsh-ctrl-enter-send
 profile_manifest="$dsh_home/profiles/web/package.json"
 desktop_enabled="${DSH_DESKTOP_ENABLED:-1}"
 
@@ -170,12 +184,16 @@ if [[ -f "$profile_manifest" ]] && node -e '
   market_declared=1
 fi
 
-password_hash="$(caddy hash-password --algorithm argon2id --plaintext "$auth_password")"
-unset HTTPS_ACCESS_HOST DSH_AUTH_USERNAME DSH_AUTH_PASSWORD auth_password
-
-install -d -m 0700 -o node -g node /data/dsh /data/dsh/home
-install -d -m 0750 -o node -g node /workspace
-install -d -m 0700 -o caddy -g caddy /data/caddy /data/caddy/config
+# The vendored composer plugin follows the same rule under its real package
+# name: a profile copy owns the row, otherwise the image overlay supplies it.
+ctrl_declared=0
+if [[ -f "$profile_manifest" ]] && node -e '
+  const fs = require("node:fs");
+  const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  process.exit(Object.hasOwn(manifest.dependencies ?? {}, "@1panel/dsh-ctrl-enter-send") ? 0 : 1);
+' "$profile_manifest"; then
+  ctrl_declared=1
+fi
 
 pids=()
 desktop_pid=""
@@ -199,6 +217,12 @@ fi
 if [[ -f "$market_patch" ]] && [[ -e "$market_source" ]] && (( ! market_declared )); then
   dsh_args+=(--patch "$market_patch")
 fi
+if [[ -f "$ctrl_patch" ]] && [[ -e "$ctrl_source" ]] && (( ! ctrl_declared )); then
+  dsh_args+=(--patch "$ctrl_patch")
+fi
+dsh_args+=(--no-open --host 127.0.0.1 --port 3080
+  --trusted-host 127.0.0.1:3080 "$access_host")
+
 # DSH_HOME is intentionally omitted so DSH derives `$HOME/.dsh`; both the
 # launcher and everything it spawns then agree on one data root (ADR 0003).
 gosu node env \

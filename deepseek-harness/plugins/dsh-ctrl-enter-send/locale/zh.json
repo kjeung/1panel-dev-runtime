@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Ctrl+Enter 发送",
+    "description": "使用 Ctrl+Enter 或 Cmd+Enter 发送消息；普通 Enter 插入换行。"
+  }
+}

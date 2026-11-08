@@ -183,7 +183,11 @@ COPY deepseek-harness/chromium-docker /usr/local/bin/chromium-docker
 COPY deepseek-harness/desktop-supervisor.sh /usr/local/bin/dsh-desktop-supervisor
 COPY deepseek-harness/web-desktop.cordis.patch.yml /opt/deepseek-harness/web-desktop.cordis.patch.yml
 COPY deepseek-harness/web-market.cordis.patch.yml /opt/deepseek-harness/web-market.cordis.patch.yml
+COPY deepseek-harness/web-ctrl-enter-send.cordis.patch.yml /opt/deepseek-harness/web-ctrl-enter-send.cordis.patch.yml
+COPY deepseek-harness/plugins/dsh-browser-desktop /opt/deepseek-harness/plugins/dsh-browser-desktop
+COPY deepseek-harness/plugins/dsh-ctrl-enter-send /opt/deepseek-harness/plugins/dsh-ctrl-enter-send
 COPY deepseek-harness/test-runtime.mjs /tmp/test-dsh-runtime.mjs
+COPY deepseek-harness/test-desktop.mjs /tmp/test-dsh-desktop.mjs
 COPY deepseek-harness/test-market.mjs /tmp/test-dsh-market.mjs
 
 RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh \
@@ -204,8 +208,9 @@ RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh \
     chromium-docker --version && \
     command -v Xvfb openbox x11vnc xdpyinfo >/dev/null && \
     node -e "Promise.all([import('/opt/deepseek-harness/plugins/dsh-browser-desktop/index.js'), import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-browser-use/lib/index.js'), import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-browser-use-playwright-mcp/lib/index.js')]).then(([plugin]) => { if (typeof plugin.apply !== 'function' || typeof plugin.viewerPath !== 'function') process.exit(1) })" && \
+    node -e "import('/opt/deepseek-harness/plugins/dsh-ctrl-enter-send/index.js').then((plugin) => { if (typeof plugin.apply !== 'function') process.exit(1) })" && \
     node --test /tmp/test-dsh-runtime.mjs && \
-    rm /tmp/test-dsh-runtime.mjs
+    node --test /tmp/test-dsh-desktop.mjs && \
     node --test /tmp/test-dsh-market.mjs && \
     node -e "Promise.all([import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'), import('node:fs')]).then(([{ evaluatePluginCompatibility, pluginCompatibilityWarning }, fs]) => { const manifest = JSON.parse(fs.readFileSync('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/dshmarket/package.json', 'utf8')); const issue = evaluatePluginCompatibility(manifest, {}); if (issue) { console.error(pluginCompatibilityWarning(issue)); process.exit(1) } })" && \
     node -e "import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js').then(({ WebServer }) => { const proto = WebServer?.prototype; if (typeof proto?.register !== 'function' || typeof proto?.registerUpgrade !== 'function') { console.error('dsh-host-webserver lost register/registerUpgrade: the desktop routes cannot mount'); process.exit(1) } })" && \
@@ -214,6 +219,9 @@ RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh \
       node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
         web --patch /opt/deepseek-harness/web-desktop.cordis.patch.yml \
             --patch /opt/deepseek-harness/web-market.cordis.patch.yml \
+            --patch /opt/deepseek-harness/web-ctrl-enter-send.cordis.patch.yml --dump-config >/dev/null && \
+    test -d /tmp/dsh-config-check-home/.dsh/profiles && \
+    rm -rf /tmp/dsh-config-check-home && \
     rm /tmp/test-dsh-runtime.mjs /tmp/test-dsh-desktop.mjs /tmp/test-dsh-market.mjs
 
 # DSH_HOME is deliberately NOT set: DSH then derives `$HOME/.dsh`, which is the

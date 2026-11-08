@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Ctrl+Enter to send",
+    "description": "Sends messages with Ctrl+Enter or Cmd+Enter; plain Enter inserts a line break."
+  }
+}

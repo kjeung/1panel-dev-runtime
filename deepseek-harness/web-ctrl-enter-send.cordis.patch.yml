@@ -1,0 +1,18 @@
+# Extra Cordis overlay for the vendored Ctrl/Cmd+Enter composer plugin.
+#
+# The row names the image copy by absolute path: the Cordis loader accepts path
+# specifiers, and the client roster discovers the package's `dsh.client`
+# declaration by walking up to the nearest `package.json`, so the Web profile
+# needs no dependency and no symlink for image content.
+#
+# This is the same shape as web-desktop.cordis.patch.yml. Loading it here rather
+# than installing it into the profile is what keeps the plugin alive across a
+# container rebuild: a profile `link:` would pin an absolute checkout path that
+# only exists on a developer host.
+#
+# The entrypoint omits this overlay when the profile already declares the plugin
+# as a dependency: that copy supplies the same row through its bundle layer, and
+# inserting both would compose the row twice.
+- insert:
+    - id: ctrl-enter-send
+      name: /opt/deepseek-harness/plugins/dsh-ctrl-enter-send/index.js

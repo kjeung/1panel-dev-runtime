@@ -1,0 +1,6 @@
+# Bundle patch used by `dsh plugin add`; this image also loads plugins from the
+# profile that `dsh web` composes (the same mechanism as the Browser desktop
+# plugin's overlay).
+- insert:
+    - id: ctrl-enter-send
+      name: '@1panel/dsh-ctrl-enter-send'
