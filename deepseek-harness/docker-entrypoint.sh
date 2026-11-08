@@ -153,9 +153,21 @@ repair_ownership "$home_root/.ssh"
 
 dsh_root=/usr/local/lib/node_modules/@deepseek-ai/dsh
 desktop_patch=/opt/deepseek-harness/web-desktop.cordis.patch.yml
+market_patch=/opt/deepseek-harness/web-market.cordis.patch.yml
+market_source="$dsh_root/node_modules/dshmarket"
 profile_manifest="$dsh_home/profiles/web/package.json"
 desktop_enabled="${DSH_DESKTOP_ENABLED:-1}"
 
+# A profile install of the market (`dsh plugin add dshmarket`, which updates
+# itself) owns its own `dsh-market` row through its bundle layer. Leave it in
+# place and do not pass the image overlay, so the row is never inserted twice.
+market_declared=0
+if [[ -f "$profile_manifest" ]] && node -e '
+  const fs = require("node:fs");
+  const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  process.exit(Object.hasOwn(manifest.dependencies ?? {}, "dshmarket") ? 0 : 1);
+' "$profile_manifest"; then
+  market_declared=1
 fi
 
 password_hash="$(caddy hash-password --algorithm argon2id --plaintext "$auth_password")"
@@ -183,6 +195,9 @@ trap 'exit 130' INT
 dsh_args=(web)
 if [[ -f "$desktop_patch" ]]; then
   dsh_args+=(--patch "$desktop_patch")
+fi
+if [[ -f "$market_patch" ]] && [[ -e "$market_source" ]] && (( ! market_declared )); then
+  dsh_args+=(--patch "$market_patch")
 fi
 # DSH_HOME is intentionally omitted so DSH derives `$HOME/.dsh`; both the
 # launcher and everything it spawns then agree on one data root (ADR 0003).

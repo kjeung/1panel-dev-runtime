@@ -1,0 +1,18 @@
+# Extra Cordis overlay for the image-baked community plugin market (dshmarket).
+# The row names the image copy by absolute path: the Cordis loader accepts path
+# specifiers and the client roster discovers the package's `dsh.client`
+# declaration from its nearest `package.json`, so the Web profile needs no
+# symlink for image content. `DSH_MARKET_ENABLED=0` keeps the package in the
+# image but leaves the row disabled at composition time.
+#
+# The entrypoint omits this overlay when the profile already declares dshmarket
+# as a dependency: that copy supplies the same row through its bundle layer and
+# is left in charge so its self-update keeps working.
+- insert:
+    - id: dsh-market
+      name: /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/dshmarket/lib/index.js
+      disabled: !!js process.env.DSH_MARKET_ENABLED === '0'
+      config:
+        # The container entrypoint owns the DSH lifecycle; the market's own
+        # one-click restart cannot work in this deployment.
+        allowRestart: false

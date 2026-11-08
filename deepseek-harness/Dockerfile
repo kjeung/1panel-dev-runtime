@@ -1,8 +1,9 @@
 FROM caddy:2.11.4 AS caddy
+ARG DSH_MARKET_VERSION=1.73.9
 
 FROM node:24-bookworm-slim AS dsh-builder
 
-ARG DSH_VERSION=0.2.2-rc.1
+# Stages re-declare the ARG without a value so they inherit the global default
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -40,6 +41,35 @@ RUN mkdir -p /opt/dsh-browser-use && \
     test "$(node -p 'require("/opt/dsh-browser-use/node_modules/@deepseek-ai/dsh-experimental-browser-use-playwright-mcp/package.json").version')" = "${DSH_VERSION}" && \
     npm cache clean --force
 
+# Community plugin market (dshmarket), shipped as image content so a fresh data
+# volume has it without a network install. It is installed outside DSH's prefix
+# first: adding packages directly to DSH's published, generated node_modules can
+# make npm prune packages DSH owns. `--ignore-scripts` matches the Browser Use
+# stage; the package needs no build step.
+FROM node:24-bookworm-slim AS dsh-market
+
+ARG DSH_MARKET_VERSION
+
+RUN mkdir -p /opt/dshmarket && \
+    npm pack --pack-destination /tmp "dshmarket@${DSH_MARKET_VERSION}" && \
+    tar --extract --gzip \
+      --file "/tmp/dshmarket-${DSH_MARKET_VERSION}.tgz" \
+      --strip-components=1 \
+      --directory /opt/dshmarket && \
+    npm install \
+      --prefix /opt/dshmarket \
+      --package-lock=false \
+      --omit=dev \
+      --no-audit \
+      --no-fund \
+      --ignore-scripts \
+      --legacy-peer-deps && \
+    test "$(node -p 'require("/opt/dshmarket/package.json").version')" = "${DSH_MARKET_VERSION}" && \
+    test -f /opt/dshmarket/cordis.patch.yml && \
+    test "$(node -p 'require("/opt/dshmarket/package.json").dsh.bundle.patch')" = "./cordis.patch.yml" && \
+    rm -f "/tmp/dshmarket-${DSH_MARKET_VERSION}.tgz" && \
+    npm cache clean --force
+
 # noVNC is the browser-side VNC client. The Debian 12 package is 1.3.0, which
 # cannot connect over a relative WebSocket URL (it insists on an explicit host);
 # pin the upstream 1.6.0 asset tree instead so the viewer works on any origin
@@ -74,13 +104,16 @@ FROM node:24-bookworm-slim
 
 ARG PNPM_VERSION=11.7.0
 # Re-declared so the version is recorded as image metadata as well.
+ARG DSH_MARKET_VERSION
+ARG NOVNC_VERSION=1.6.0
 
 LABEL org.opencontainers.image.source="https://github.com/1Panel-dev/runtime" \
       org.opencontainers.image.url="https://github.com/deepseek-ai/deepseek-harness" \
       org.opencontainers.image.title="1Panel DeepSeek Harness" \
-      org.opencontainers.image.description="DeepSeek Harness image maintained by 1Panel with HTTPS access and persistent runtime data" \
-      org.opencontainers.image.vendor="1Panel"
+      org.opencontainers.image.description="DeepSeek Harness image maintained by 1Panel with a same-origin Chromium/noVNC desktop and the dsh-market plugin market, meant to run behind an authenticated TLS reverse proxy" \
+      io.github.1panel.dsh-market-version="${DSH_MARKET_VERSION}"
 
+# Debian Chromium plus the X stack behind the embedded desktop. The desktop has
 # no port of its own: x11vnc binds loopback and the Harness web server bridges
 # the noVNC WebSocket, so the operator's existing TLS + authentication entry
 # point stays the only way in. Noto CJK keeps Chinese pages and screenshots
@@ -122,6 +155,7 @@ RUN install -d -m 0755 /etc/apt/keyrings && \
 
 COPY --from=dsh-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=browser-use /opt/dsh-browser-use/node_modules/. /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/
+COPY --from=dsh-market /opt/dshmarket /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/dshmarket
 
 # The data root is the `node` user's OS home (/home/node), which is also the
 # home recorded in /etc/passwd. Keeping the two identical is the whole point
@@ -150,8 +184,9 @@ COPY deepseek-harness/desktop-supervisor.sh /usr/local/bin/dsh-desktop-superviso
 COPY deepseek-harness/web-desktop.cordis.patch.yml /opt/deepseek-harness/web-desktop.cordis.patch.yml
 COPY deepseek-harness/web-market.cordis.patch.yml /opt/deepseek-harness/web-market.cordis.patch.yml
 COPY deepseek-harness/test-runtime.mjs /tmp/test-dsh-runtime.mjs
+COPY deepseek-harness/test-market.mjs /tmp/test-dsh-market.mjs
 
-RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh && \
+RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh \
       /usr/local/bin/dsh-node-proxy /usr/local/bin/chromium-docker \
       /usr/local/bin/dsh-desktop-supervisor && \
     ln -s chromium-docker /usr/local/bin/chrome && \
@@ -171,9 +206,15 @@ RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh && \
     node -e "Promise.all([import('/opt/deepseek-harness/plugins/dsh-browser-desktop/index.js'), import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-browser-use/lib/index.js'), import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-browser-use-playwright-mcp/lib/index.js')]).then(([plugin]) => { if (typeof plugin.apply !== 'function' || typeof plugin.viewerPath !== 'function') process.exit(1) })" && \
     node --test /tmp/test-dsh-runtime.mjs && \
     rm /tmp/test-dsh-runtime.mjs
+    node --test /tmp/test-dsh-market.mjs && \
+    node -e "Promise.all([import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'), import('node:fs')]).then(([{ evaluatePluginCompatibility, pluginCompatibilityWarning }, fs]) => { const manifest = JSON.parse(fs.readFileSync('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/dshmarket/package.json', 'utf8')); const issue = evaluatePluginCompatibility(manifest, {}); if (issue) { console.error(pluginCompatibilityWarning(issue)); process.exit(1) } })" && \
+    node -e "import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js').then(({ WebServer }) => { const proto = WebServer?.prototype; if (typeof proto?.register !== 'function' || typeof proto?.registerUpgrade !== 'function') { console.error('dsh-host-webserver lost register/registerUpgrade: the desktop routes cannot mount'); process.exit(1) } })" && \
+    mkdir -p /tmp/dsh-config-check-home && \
+    HOME=/tmp/dsh-config-check-home \
       node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
         web --patch /opt/deepseek-harness/web-desktop.cordis.patch.yml \
             --patch /opt/deepseek-harness/web-market.cordis.patch.yml \
+    rm /tmp/test-dsh-runtime.mjs /tmp/test-dsh-desktop.mjs /tmp/test-dsh-market.mjs
 
 # DSH_HOME is deliberately NOT set: DSH then derives `$HOME/.dsh`, which is the
 # layout its own defaults and the plugin ecosystem assume (see ADR 0003).

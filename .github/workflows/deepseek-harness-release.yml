@@ -14,12 +14,14 @@ on:
         default: "0.2.2-rc.1"
         required: true
       dshMarketVersion:
+        description: "dshmarket npm version (community plugin market, independent of DSH)"
+        default: "1.73.9"
+        required: true
       platforms:
         description: "Platforms"
         default: "linux/amd64,linux/arm64"
         required: true
-      pushLatest:
-        description: "Push latest tag"
+      imageName:
         description: "Target image repository (plain-HTTP variant, not the Caddy image)"
         default: "kjeung/deepseek-harness-plain"
         required: true
@@ -77,22 +79,17 @@ jobs:
           push: true
           build-args: |
             DSH_VERSION=${{ github.event.inputs.dshVersion }}
+            DSH_MARKET_VERSION=${{ inputs.dshMarketVersion }}
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.event.inputs.dshVersion }}
+            ${{ inputs.imageName }}:${{ inputs.dshVersion }}
           cache-from: type=gha,scope=deepseek-harness
           cache-to: type=gha,mode=max,scope=deepseek-harness
 
-      - name: Push latest tag
-        if: ${{ github.event.inputs.pushLatest == 'true' }}
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: deepseek-harness/Dockerfile
-          platforms: ${{ github.event.inputs.platforms }}
-          push: true
-          build-args: |
-            DSH_VERSION=${{ github.event.inputs.dshVersion }}
-          tags: |
-            ${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha,scope=deepseek-harness
-          cache-to: type=gha,mode=max,scope=deepseek-harness
+      # Alias the immutable version tag instead of running a second build, so both
+      # tags always resolve to the same multi-arch digest.
+      - name: Push plain alias
+        if: ${{ inputs.pushAlias == 'true' }}
+        run: |
+          docker buildx imagetools create \
+            --tag "${{ inputs.imageName }}:plain" \
+            "${{ inputs.imageName }}:${{ inputs.dshVersion }}"
