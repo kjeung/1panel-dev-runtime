@@ -1,9 +1,17 @@
-FROM caddy:2.11.4 AS caddy
+# One default for the whole build: a per-stage default would let the stages
+# drift apart (for example installing Browser Use for an older DSH than the
+# image actually runs). Each stage re-declares the ARG without a value and
+# inherits this one; `--build-arg DSH_VERSION=...` still overrides all of them.
+ARG DSH_VERSION=0.2.2-rc.1
+# The community plugin market is not a DSH dependency and its peer range tracks
+# the DSH minor line; bump it together with DSH_VERSION (see SYNC-UPSTREAM.md §5).
 ARG DSH_MARKET_VERSION=1.73.9
 
 FROM node:24-bookworm-slim AS dsh-builder
 
 # Stages re-declare the ARG without a value so they inherit the global default
+# above; only the first `ARG DSH_VERSION=` in this file carries a value.
+ARG DSH_VERSION
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -25,6 +33,8 @@ RUN npm install --prefix /tmp/dsh-browser-compat --no-audit --no-fund \
 # first: adding packages directly to the published DSH tree can make npm prune
 # packages that belong to DSH's generated distribution.
 FROM node:24-bookworm-slim AS browser-use
+
+ARG DSH_VERSION
 
 RUN mkdir -p /opt/dsh-browser-use && \
     npm install \
@@ -104,6 +114,7 @@ FROM node:24-bookworm-slim
 
 ARG PNPM_VERSION=11.7.0
 # Re-declared so the version is recorded as image metadata as well.
+ARG DSH_VERSION
 ARG DSH_MARKET_VERSION
 ARG NOVNC_VERSION=1.6.0
 
@@ -111,6 +122,8 @@ LABEL org.opencontainers.image.source="https://github.com/1Panel-dev/runtime" \
       org.opencontainers.image.url="https://github.com/deepseek-ai/deepseek-harness" \
       org.opencontainers.image.title="1Panel DeepSeek Harness" \
       org.opencontainers.image.description="DeepSeek Harness image maintained by 1Panel with a same-origin Chromium/noVNC desktop and the dsh-market plugin market, meant to run behind an authenticated TLS reverse proxy" \
+      org.opencontainers.image.version="${DSH_VERSION}" \
+      org.opencontainers.image.vendor="1Panel" \
       io.github.1panel.dsh-market-version="${DSH_MARKET_VERSION}"
 
 # Debian Chromium plus the X stack behind the embedded desktop. The desktop has

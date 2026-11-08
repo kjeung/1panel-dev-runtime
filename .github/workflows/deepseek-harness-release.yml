@@ -78,7 +78,7 @@ jobs:
           platforms: ${{ inputs.platforms }}
           push: true
           build-args: |
-            DSH_VERSION=${{ github.event.inputs.dshVersion }}
+            DSH_VERSION=${{ inputs.dshVersion }}
             DSH_MARKET_VERSION=${{ inputs.dshMarketVersion }}
           tags: |
             ${{ inputs.imageName }}:${{ inputs.dshVersion }}
