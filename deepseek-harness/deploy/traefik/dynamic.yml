@@ -1,0 +1,58 @@
+# Traefik v3 动态配置（file provider）——DeepSeek Harness 明文 HTTP 回源
+#
+# 前提：
+#   1) 本文件挂载到 Traefik 容器的 /etc/traefik/dynamic（static config 里
+#      providers.file.directory 指向它，watch: true 可热更新）；
+#   2) deepseek-harness 容器与 Traefik 在同一个 docker 网络（默认网络名 traefik），
+#      容器内监听 0.0.0.0:8080；
+#   3) 已存在认证中间件（下面 dsh-auth 只是占位示例，换成你自己的）。
+
+# 内嵌的 Chromium 桌面（/desktop/ 静态资源 + /desktop/websockify 的 RFB WebSocket）
+# 也走下面这同一个 router，不需要第二个 Host、第二个入口点或 stripPrefix：
+#   - 桌面路径是容器内 dsh 自己注册的路由，回源路径必须原样保留；
+#   - 认证中间件已经挂在这个 router 上，因此天然覆盖桌面和它的 WebSocket 升级；
+#   - 不要给它加 buffering / compress（会毁掉桌面 socket 与 SSE 流）。
+
+http:
+  routers:
+    deepseek-harness:
+      rule: "Host(`dsh.example.com`)"      # 必须与 DSH_ACCESS_HOST 完全一致
+      entryPoints: ["websecure"]
+      service: deepseek-harness
+      middlewares: ["dsh-auth"]            # 认证在这里，容器内没有认证
+      tls:
+        certResolver: "le"                 # 换成你的证书解析器；没启用则删除 tls 段
+
+  services:
+    deepseek-harness:
+      loadBalancer:
+        # 必须为 true（默认值）：保留浏览器原始 Host，否则容器内 Host 白名单/DSH 栅栏全部 403
+        passHostHeader: true
+        serversTransport: dsh-transport
+        servers:
+          - url: "http://deepseek-harness:8080"
+        # 可选健康检查：/healthz 只接受回环来源或带共享密钥的请求，
+        # 所以必须带 X-DSH-Proxy-Secret（否则 Traefik 会判 403 → 后端被摘除）。
+        # 没设 PROXY_SHARED_SECRET 时请不要启用 healthCheck，交给容器自带 healthcheck。
+        # healthCheck:
+        #   path: /healthz
+        #   interval: 30s
+        #   timeout: 3s
+        #   headers:
+        #     X-DSH-Proxy-Secret: "<与 PROXY_SHARED_SECRET 相同>"
+
+  middlewares:
+    # 占位示例：换成你现有的 forwardAuth / oidc / basicAuth 中间件。
+    # 注意认证必须覆盖所有路径，包括 WebSocket /api/remote.mux。
+    dsh-auth:
+      basicAuth:
+        users:
+          - "admin:$apr1$REPLACE$REPLACE"
+
+  serversTransports:
+    # 长连接/流式：不要给响应头设超时；LLM 输出和 SSE 可能长时间无数据但连接有效
+    dsh-transport:
+      forwardingTimeouts:
+        dialTimeout: "30s"
+        responseHeaderTimeout: "0s"
+        idleConnTimeout: "90s"

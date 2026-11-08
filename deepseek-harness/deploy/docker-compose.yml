@@ -1,0 +1,123 @@
+# DeepSeek Harness —— 明文 HTTP 版（无登录、无 TLS、无 Caddy）
+#
+# 架构：浏览器 → 你的外部反向代理（负责登录认证 + TLS）→ 本容器 8080（Node 转发，无认证）
+#       → 容器内 127.0.0.1:3080（dsh web）
+#       → 容器内同一 3080 的 /desktop/（Chromium 桌面，noVNC 静态资源 + RFB 桥接）
+#
+# 代码位置：本文件在 deepseek-harness/deploy/ 下；构建上下文是仓库根（../..），
+# 镜像源码在本目录的上一级（../）。
+#
+# 安全前提：容器内**没有任何认证**。8080 端口只能让外部反代访问，
+# 默认只发布到宿主机 127.0.0.1，切勿改成 0.0.0.0 暴露到不可信网络。
+#
+# 桌面说明：Chromium 桌面不额外开端口，就是同一个 8080 上的 /desktop/。
+# 拿到该路径的人等于拿到容器里的浏览器（能登录你的账号、用你的网络），
+# 因此反代的认证中间件必须覆盖全部路径，包括 /desktop/websockify 的 WebSocket 升级。
+#
+# 插件市场：镜像内置社区插件市场 dshmarket，入口在 DSH 的「插件」页；
+# DSH_MARKET_ENABLED=0 只关闭入口，市场装的社区插件仍在 /home/node 卷里。
+#
+# 用法：
+#   cp .env.example .env        # 只需填 DSH_ACCESS_HOST
+#   docker compose up -d --build
+#   docker compose logs -f      # 出现 "available at http://<host>:8080" 即就绪
+
+name: deepseek-harness
+
+services:
+  deepseek-harness:
+    # 从仓库根构建（context: ../..），Dockerfile 在 deepseek-harness/。
+    # 若要使用已构建好的镜像，设置 DSH_IMAGE 并删掉 build + pull_policy 段。
+    image: ${DSH_IMAGE:-deepseek-harness:plain}
+    # 同时出现 image 与 build 时，Compose 默认「先 pull，pull 不到才 build」，
+    # 因此显式声明总是构建；要用已构建镜像请删掉整个 build 段。
+    pull_policy: build
+    build:
+      context: ../..
+      dockerfile: deepseek-harness/Dockerfile
+      args:
+        DSH_VERSION: ${DSH_VERSION:-0.2.2-rc.1}
+        # 社区插件市场版本，独立于 DSH 版本升级（DSH 换 minor 时要同步复核 peer 范围）
+        DSH_MARKET_VERSION: ${DSH_MARKET_VERSION:-1.73.9}
+    container_name: deepseek-harness
+    restart: unless-stopped
+
+    # 桌面容器里跑着一个会渲染任意网页的浏览器：禁止任何进程通过 setuid 提权。
+    # 注意：这同时放弃了“安装 chromium-sandbox（setuid helper）启用渲染沙箱”这条路，
+    # 二者只能选一个。也不能用 cap_drop: ALL —— 入口脚本需要 CAP_CHOWN 修正数据卷属主。
+    security_opt:
+      - no-new-privileges:true
+
+    # Chromium 的渲染进程用 /dev/shm；Docker 默认 64 MiB 会让复杂页面崩渲染进程。
+    # 镜像里的 chromium-docker 在没有足够 /dev/shm 时会退回磁盘共享内存，这里仍建议保留 1 GiB。
+    shm_size: "1gb"
+
+    # 不要设置 user:，入口脚本需要 root 修正 /data、/workspace 属主，
+    # 随后以 node(1000) 身份降权运行 dsh 与反代。
+    environment:
+      # 必填：浏览器实际访问的主机名/IPv4（不带协议和端口）。
+      # 它同时是 dsh 的 --trusted-host（/api 的 Host 白名单）与反代的 Host 白名单。
+      # 留空也能启动 compose，但容器会在入口校验阶段报错退出（错误信息更明确）。
+      # 只读取这一个变量：旧 Caddy 变体的 HTTPS_ACCESS_HOST/DSH_AUTH_* 不会被转发。
+      DSH_ACCESS_HOST: ${DSH_ACCESS_HOST:-}
+      # 可选：要求外部反代带 X-DSH-Proxy-Secret 头才转发（纵深防御，不是认证）
+      PROXY_SHARED_SECRET: ${PROXY_SHARED_SECRET:-}
+      # 访问日志（JSON 行，只记 pathname 不记 query；置 0 关闭）
+      PROXY_ACCESS_LOG: ${PROXY_ACCESS_LOG:-1}
+      #
+      # 可选：内嵌 Chromium 桌面（默认开启）。置 0 只关闭桌面与 Browser Use，
+      # 镜像仍然包含它们；/desktop/ 与 /browser-desktop/* 会 404。
+      DSH_DESKTOP_ENABLED: ${DSH_DESKTOP_ENABLED:-1}
+      # 可选：Browser Use 工具（默认开启；DSH_DESKTOP_ENABLED=0 时一并关闭）
+      DSH_BROWSER_USE_ENABLED: ${DSH_BROWSER_USE_ENABLED:-1}
+      # 可选：社区插件市场（默认开启）。置 0 只关闭市场行，镜像仍包含该插件。
+      DSH_MARKET_ENABLED: ${DSH_MARKET_ENABLED:-1}
+      # 可选：虚拟桌面分辨率与色深（默认 1440x900x24）
+      DSH_DESKTOP_WIDTH: ${DSH_DESKTOP_WIDTH:-1440}
+      DSH_DESKTOP_HEIGHT: ${DSH_DESKTOP_HEIGHT:-900}
+      DSH_DESKTOP_DEPTH: ${DSH_DESKTOP_DEPTH:-24}
+      # 可选：浏览器 profile 目录（默认 /home/node/chrome-profile）。换目录等于换一套
+      # 登录态；必须位于 /home/node 卷内才能随卷持久化。
+      CHROME_USER_DATA_DIR: ${CHROME_USER_DATA_DIR:-/home/node/chrome-profile}
+      #
+      # 可选：dsh 应用层变量（.env 里取消注释后，这里也要取消对应行才会进容器）
+      # DSH_PERMISSION_MODE: ${DSH_PERMISSION_MODE:-workspace-write}
+      # DSH_TOOLS_MODE: ${DSH_TOOLS_MODE:-native}
+      # DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+      # HTTP_PROXY: ${HTTP_PROXY:-}
+      # HTTPS_PROXY: ${HTTPS_PROXY:-}
+      # NO_PROXY: ${NO_PROXY:-}
+
+    ports:
+      # 只发布到宿主机回环：外部反代若在同机，从 127.0.0.1:8080 回源。
+      # 若外部反代在另一个容器，请删掉这行、改用共享 docker 网络并只 expose。
+      - "127.0.0.1:${DSH_HTTP_PORT:-8080}:8080"
+
+    volumes:
+      # 用户态根：整个 node 用户的 home —— `.dsh/`（profiles、settings.yaml、
+      # .credentials.yaml、会话、日志）、`.cache`、`.config`（gh 登录态）、
+      # `.gitconfig`、`.ssh/`（SSH 密钥与 known_hosts）以及 `chrome-profile/`。
+      # 挂载点就是 /etc/passwd 给 node 记的 home，所以 $HOME 与 getpwuid() 一致，
+      # ssh 系工具与 DSH 都落在同一处（ADR 0004）。
+      - ${DSH_DATA_DIR:-./data/home}:/home/node
+      # Agent 工作目录（沙箱 workspaceRoot）
+      - ${WORKSPACE_DIR:-./workspace}:/workspace
+
+    # /healthz 会同时探测反代与后端 dsh；入口脚本先等 dsh 就绪再起反代，
+    # 冷启动最多 60 秒，因此 start_period 放宽。
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --noproxy '*' --max-time 5 http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+
+    # 给 dsh 与反代留出优雅退出时间（tini 转发 SIGTERM）
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
