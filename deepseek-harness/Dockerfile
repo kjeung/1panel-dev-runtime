@@ -12,10 +12,17 @@ RUN apt-get update && \
     npm install --global "@deepseek-ai/dsh@${DSH_VERSION}"
 
 COPY deepseek-harness/patch-dsh-authenticated-settings.mjs /tmp/patch-dsh-authenticated-settings.mjs
+COPY deepseek-harness/patch-dsh-manifest-sse.mjs /tmp/patch-dsh-manifest-sse.mjs
 
 RUN npm install --prefix /tmp/dsh-browser-compat --no-audit --no-fund \
       core-js@3.51.0 esbuild@0.28.2 && \
-    node /tmp/patch-dsh-authenticated-settings.mjs
+    node /tmp/patch-dsh-authenticated-settings.mjs && \
+    node /tmp/patch-dsh-manifest-sse.mjs
+
+# Official Browser Use plus its Playwright MCP provider, at exactly the DSH
+# version installed above. They are installed outside DSH's package prefix
+# first: adding packages directly to the published DSH tree can make npm prune
+# packages that belong to DSH's generated distribution.
 
 FROM node:24-bookworm-slim
 
@@ -42,6 +49,16 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=caddy /usr/bin/caddy /usr/bin/caddy
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
+    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/* && \
+    gh --version
+
 COPY --from=dsh-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 # The data root is the `node` user's OS home (/home/node), which is also the
