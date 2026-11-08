@@ -37,7 +37,8 @@ RUN apt-get update && \
       gosu \
       openssh-client \
       ripgrep \
-      tini && \
+      tini \
+      x11-utils \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=caddy /usr/bin/caddy /usr/bin/caddy
@@ -57,6 +58,7 @@ RUN npm install --global "pnpm@${PNPM_VERSION}" && \
     test "$(gosu node env HOME=/data/dsh/home pnpm --version)" = "$PNPM_VERSION"
 
 COPY deepseek-harness/Caddyfile /etc/caddy/Caddyfile
+COPY deepseek-harness/node-proxy.mjs /usr/local/bin/dsh-node-proxy
 COPY deepseek-harness/dsh /usr/local/bin/dsh
 COPY deepseek-harness/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY deepseek-harness/test-runtime.mjs /tmp/test-dsh-runtime.mjs
@@ -64,18 +66,25 @@ COPY deepseek-harness/test-runtime.mjs /tmp/test-dsh-runtime.mjs
 RUN chmod 0755 /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh && \
     dsh --help >/dev/null && \
     /usr/local/bin/docker-entrypoint.sh --self-test && \
+    /usr/local/bin/dsh-node-proxy --self-test && \
     node --test /tmp/test-dsh-runtime.mjs && \
     rm /tmp/test-dsh-runtime.mjs
+      node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
+        web --patch /opt/deepseek-harness/web-desktop.cordis.patch.yml \
+            --patch /opt/deepseek-harness/web-market.cordis.patch.yml \
 
 ENV DSH_HOME=/data/dsh \
     DSH_TELEMETRY_DISABLED=1
 
 WORKDIR /workspace
 
-EXPOSE 8443
+# Only the forwarding proxy is published. The Chromium desktop is served from
+EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD curl -fsS --max-time 5 http://127.0.0.1:3080/ >/dev/null || exit 1
+# The entrypoint waits up to 60 s for the backend before starting the proxy, so the
+# start period must stay above that or a cold container is briefly marked unhealthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+  CMD curl -fsS --noproxy '*' --max-time 5 http://127.0.0.1:8080/healthz >/dev/null || exit 1
 
 STOPSIGNAL SIGTERM
 

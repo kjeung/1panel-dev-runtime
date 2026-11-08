@@ -1,6 +1,11 @@
-name: Build DeepSeek Harness Image
-run-name: Build DeepSeek Harness Image ${{ github.event.inputs.dshVersion }}
+name: Build DeepSeek Harness Image (plain HTTP)
+run-name: Build DeepSeek Harness Image ${{ inputs.dshVersion }}
 
+# This image terminates no TLS and performs no authentication: it must run behind
+# an authenticated TLS reverse proxy, listening on plain-HTTP 8080. It is therefore
+# published under its OWN repository name and alias, never as
+# 1panel/deepseek-harness:<version> or :latest — that would silently replace the
+# Caddy/HTTPS image with a different security model.
 on:
   workflow_dispatch:
     inputs:
@@ -8,18 +13,23 @@ on:
         description: "@deepseek-ai/dsh npm version"
         default: "0.2.2-rc.1"
         required: true
+      dshMarketVersion:
       platforms:
         description: "Platforms"
         default: "linux/amd64,linux/arm64"
         required: true
       pushLatest:
         description: "Push latest tag"
+        description: "Target image repository (plain-HTTP variant, not the Caddy image)"
+        default: "kjeung/deepseek-harness-plain"
+        required: true
+      pushAlias:
+        description: "Also tag the alias ':plain' (in addition to ':<dshVersion>')"
         default: "true"
         required: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  IMAGE_NAME: 1panel/deepseek-harness
 
 jobs:
   docker:
@@ -27,6 +37,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      # Never let a manual input publish the plain-HTTP variant over the
+      # official Caddy/HTTPS image. This is a hard gate, not just a comment.
+      - name: Refuse to overwrite the official Caddy image
+        env:
+          IMAGE_NAME: ${{ inputs.imageName }}
+        run: |
+          if [ -z "$IMAGE_NAME" ]; then
+            echo "::error::imageName must not be empty"
+            exit 1
+          fi
+          case "$IMAGE_NAME" in
+            1panel/deepseek-harness|*/1panel/deepseek-harness)
+              echo "::error::refusing to publish the plain-HTTP variant to $IMAGE_NAME; use a separate repository (for example kjeung/deepseek-harness-plain)"
+              exit 1
+              ;;
+          esac
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -41,11 +68,12 @@ jobs:
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           file: deepseek-harness/Dockerfile
-          platforms: ${{ github.event.inputs.platforms }}
+          platforms: ${{ inputs.platforms }}
           push: true
           build-args: |
             DSH_VERSION=${{ github.event.inputs.dshVersion }}

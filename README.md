@@ -7,7 +7,7 @@ This repository contains runtime images used by 1Panel.
 Current images in this repository:
 
 - `1panel/comfyui`
-- `1panel/deepseek-harness`
+- `kjeung/deepseek-harness-plain`
 - `1panel/hermes-agent`
 - `1panel/openclaw`
 - `1panel/vllm-gb10-dual-node`
@@ -18,7 +18,7 @@ Current images in this repository:
 ## Images
 
 - `1panel/comfyui`: ComfyUI runtime image for NVIDIA GPUs, built from matching upstream stable releases
-- `1panel/deepseek-harness`: DeepSeek Harness image maintained by 1Panel with HTTPS access and persistent runtime data
+- `kjeung/deepseek-harness-plain` (this repository publishes only the plain-HTTP variant; the official `1panel/deepseek-harness` remains the Caddy/HTTPS image): DeepSeek Harness image with a plain-HTTP Node forwarding proxy, GitHub CLI, the dsh-market plugin market, and a visible Chromium desktop (Debian Chromium, CJK fonts, Xvfb/Openbox, noVNC) served from the same origin at `/desktop/` with no extra port; meant to run behind an authenticated TLS reverse proxy. See [ADR 0001](docs/adr/0001-browser-desktop-access.md) for the access-mode trade-offs
 - `1panel/hermes-agent`: Hermes Agent runtime image maintained by 1Panel with bundled messaging channel dependencies
 - `1panel/openclaw`: OpenClaw runtime image built from official source with 1Panel-oriented customizations
 - `1panel/vllm-gb10-dual-node`: ARM64 vLLM runtime for DeepSeek V4 Flash on two NVIDIA GB10 nodes

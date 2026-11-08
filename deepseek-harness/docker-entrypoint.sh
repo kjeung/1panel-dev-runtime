@@ -24,23 +24,24 @@ printf '\033[1;32m%s\033[0m\n' 'This image is maintained by 1Panel.'
 printf '\033[1;33m%s\033[0m\n' 'For support or issue discussion, please visit:'
 printf '\033[1;36m%s\033[0m\n' 'https://github.com/1Panel-dev/1Panel/discussions'
 
-access_host="${HTTPS_ACCESS_HOST:-}"
-auth_username="${DSH_AUTH_USERNAME:-}"
-auth_password="${DSH_AUTH_PASSWORD:-}"
+# DSH_ACCESS_HOST is the host name browsers use to reach the deployment. It is
+# only used to fence the backend's /api requests; this container terminates no
+# TLS. It is the only accepted form: the old Caddy variant's HTTPS_ACCESS_HOST
+# and DSH_AUTH_* settings are not read.
+access_host="${DSH_ACCESS_HOST:-}"
 
 if ! is_access_host "$access_host"; then
-  printf 'HTTPS_ACCESS_HOST must be an IPv4 address or hostname without a scheme, path, or port.\n' >&2
+  printf 'DSH_ACCESS_HOST is required: an IPv4 address or hostname without a scheme, path, or port (wildcard/broadcast addresses are rejected).\n' >&2
   exit 1
 fi
 
-if [[ ! "$auth_username" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  printf 'DSH_AUTH_USERNAME must contain only letters, numbers, dot, underscore, or hyphen.\n' >&2
-  exit 1
+if [[ "$access_host" == 127.* ]]; then
+  printf 'Warning: DSH_ACCESS_HOST is a loopback address; the backend also trusts loopback Hosts, so the proxy Host allowlist adds nothing. Use the browser-facing host name.\n' >&2
 fi
 
-if (( ${#auth_password} < 12 )); then
-  printf 'DSH_AUTH_PASSWORD must contain at least 12 characters.\n' >&2
-  exit 1
+unset DSH_ACCESS_HOST
+
+install -d -m 0750 -o node -g node /workspace
 fi
 
 password_hash="$(caddy hash-password --algorithm argon2id --plaintext "$auth_password")"
@@ -74,13 +75,14 @@ pids+=("$dsh_pid")
 
 ready=false
 for _ in {1..60}; do
-  if curl -fsS --max-time 2 http://127.0.0.1:3080/ >/dev/null 2>&1; then
+  if curl -fsS --noproxy '*' --max-time 2 http://127.0.0.1:3080/ >/dev/null 2>&1; then
     ready=true
     break
   fi
   if ! kill -0 "$dsh_pid" 2>/dev/null; then
     wait "$dsh_pid"
     exit $?
+  fi
   fi
   sleep 1
 done
@@ -99,9 +101,16 @@ gosu caddy env \
   caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
 caddy_pid=$!
 pids+=("$caddy_pid")
+  PROXY_LISTEN_HOST=0.0.0.0 \
+  PROXY_LISTEN_PORT=8080 \
+  PROXY_ALLOWED_HOSTS="$access_host" \
+  node /usr/local/bin/dsh-node-proxy &
+proxy_pid=$!
+pids+=("$proxy_pid")
 
-printf 'DeepSeek Harness is available at https://%s:8443 inside the container.\n' "$access_host"
-printf 'The local CA certificate is stored at /data/caddy/pki/authorities/local/root.crt.\n'
+printf 'DeepSeek Harness is available at http://%s:8080 inside the container (plain HTTP).\n' "$access_host"
+printf 'This container performs no TLS and no authentication: restrict port 8080 to the trusted reverse proxy.\n'
+wait_pids=("$dsh_pid" "$proxy_pid")
 
 status=0
 wait -n "$dsh_pid" "$caddy_pid" || status=$?
