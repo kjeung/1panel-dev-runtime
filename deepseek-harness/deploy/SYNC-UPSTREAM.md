@@ -1,9 +1,9 @@
 # 与上游同步（1Panel-dev/runtime）
 
-本仓库 `kjeung/runtime` 是上游 `1Panel-dev/runtime` 的 fork，默认分支 **`main`**：
+本仓库 `kjeung/runtime` 是上游 `1Panel-dev/runtime` 的 fork，默认分支 **`dev`**：
 
 ```
-1Panel-dev/runtime : dev ──(merge/rebase)──▶ kjeung/runtime : main
+1Panel-dev/runtime : dev ──(merge/rebase)──▶ kjeung/runtime : dev
                                              ├── deepseek-harness/   改造后的镜像源码
                                              ├── deepseek-harness/deploy/   部署编排与文档
                                              ├── .github/workflows/  构建 + 每日同步 workflow
@@ -31,17 +31,17 @@ git remote add upstream https://github.com/1Panel-dev/runtime.git
 `.github/workflows/sync-upstream.yml`：
 
 - 每天 **03:17 UTC** + 手动 `workflow_dispatch`；
-- `fetch upstream dev`；`main` 已包含就结束；
-- 否则把 `upstream/dev` **merge** 到 `sync/upstream-<sha>`，跑自检后 push，并向 `main` 开 **PR**
+- `fetch upstream dev`；`dev` 已包含就结束；
+- 否则把 `upstream/dev` **merge** 到 `sync/upstream-<sha>`，跑自检后 push，并向 `dev` 开 **PR**
   （PR 列出上游新提交、dsh 版本漂移警告、合并后要做的事）；
 - merge 冲突时中止并开 **issue**「upstream dev@<sha> needs a manual merge」；
 - 已有 open PR/issue 时不重复开。
 
-为什么用 merge：rebase 后的分支与 `main` 没有祖先关系，PR 合并会产生重复提交；merge 可 fast-forward。
+为什么用 merge：rebase 后的分支与 `dev` 没有祖先关系，PR 合并会产生重复提交；merge 可 fast-forward。
 想要线性历史时本地跑 `deepseek-harness/deepseek-harness/deploy/scripts/sync-upstream.sh`（rebase），之后的 rebase 会自动丢掉 merge 提交，两种方式可共存。
 
-> 定时工作流只在**默认分支**运行，所以本仓库默认分支是 `main`（不是上游的 `dev`）。
-> 副作用：网页 **Sync fork** 等价于「merge upstream/dev 进 main」，与工作流同一模型。
+> 定时工作流只在**默认分支**运行，本仓库默认分支是 `dev`，与上游默认分支同名：GitHub fork 横幅会自动按 `dev ↔ dev` 比较。
+> 同时这意味着网页 **Sync fork** 等价于「merge upstream/dev 进 dev」，与工作流同一模型。
 
 **合并 PR 之后**：不需要再同步任何「部署仓库」——`deepseek-harness/deploy/` 就在同一分支里。
 直接重新构建即可：
@@ -55,17 +55,17 @@ cd deepseek-harness/deploy && docker compose build && docker compose up -d
 
 ```bash
 deepseek-harness/deploy/scripts/sync-upstream.sh            # fetch + rebase + 自检/测试 + 重新导出 patches
-deepseek-harness/deploy/scripts/sync-upstream.sh --push     # 再 force-with-lease 推 main
+deepseek-harness/deploy/scripts/sync-upstream.sh --push     # 再 force-with-lease 推 dev
 deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
 ```
 
 脚本做的事：
 
 1. `git fetch upstream dev`；
-2. 若上游前进：把 `main` **rebase** 到 `upstream/dev`（冲突时停下并给出指引）；
+2. 若上游前进：把 `dev` **rebase** 到 `upstream/dev`（冲突时停下并给出指引）；
 3. 自检 + 14 个代理测试（本机无 dsh 包时跳过；镜像构建期还会跑）；
-4. 重新导出 `deepseek-harness/deploy/patches/image-source.diff`、`main.bundle`，更新 `deepseek-harness/deploy/patches/BASE`；
-5. `--push` 时 `git push --force-with-lease origin main`。
+4. 重新导出 `deepseek-harness/deploy/patches/image-source.diff`、`dev.bundle`，更新 `deepseek-harness/deploy/patches/BASE`；
+5. `--push` 时 `git push --force-with-lease origin dev`。
 
 脚本不会自动解决冲突，也**不会**自动改 `DSH_VERSION`。
 脚本需要**完整历史**（浅克隆 `git fetch --unshallow` 后再用）；纯部署用浅克隆没问题。
@@ -151,10 +151,10 @@ node deepseek-harness/deploy/prototype/ws-test.mjs 8096 example.test http://exam
 ```bash
 # 自动化状态
 gh run list --repo kjeung/runtime --workflow sync-upstream.yml --limit 3
-gh pr list --repo kjeung/runtime --base main --state open
+gh pr list --repo kjeung/runtime --base dev --state open
 # 本地源码
 git log --oneline -3
-git rev-parse upstream/dev main
+git rev-parse upstream/dev dev
 cat deepseek-harness/deploy/patches/BASE
 git status                       # 应为干净
 ```

@@ -2,8 +2,8 @@ name: Sync upstream dev
 
 # On a schedule (and on demand) check whether 1Panel-dev/runtime's `dev` moved.
 # If it did, merge upstream/dev into a review branch and open a PR against
-# `main`. The PR is a fast-forwardable merge (base is an ancestor of the
-# head), so "Merge pull request" advances main without rewriting history.
+# `dev`. The PR is a fast-forwardable merge (base is an ancestor of the
+# head), so "Merge pull request" advances dev without rewriting history.
 #
 # A separate PR file could not be used with a rebase: a rebased branch has no
 # ancestor relationship with its base, and merging it would duplicate commits.
@@ -30,10 +30,10 @@ jobs:
   sync:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout main
+      - name: Checkout dev
         uses: actions/checkout@v6
         with:
-          ref: main
+          ref: dev
           fetch-depth: 0
 
       - name: Configure git identity
@@ -70,7 +70,7 @@ jobs:
         id: openpr
         if: steps.classify.outputs.state == 'behind'
         run: |
-          count="$(gh pr list --base main --state open --json headRefName \
+          count="$(gh pr list --base dev --state open --json headRefName \
             --jq '[.[] | select(.headRefName | startswith("sync/upstream-"))] | length')"
           echo "count=$count" >> "$GITHUB_OUTPUT"
 
@@ -82,7 +82,7 @@ jobs:
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
           git switch -c "$branch"
           if git merge --no-ff \
-              -m "chore: merge upstream dev@${{ steps.classify.outputs.short }} into main" \
+              -m "chore: merge upstream dev@${{ steps.classify.outputs.short }} into dev" \
               upstream/dev; then
             echo "merged=1" >> "$GITHUB_OUTPUT"
             echo "MERGED=1" >> "$GITHUB_ENV"
@@ -136,7 +136,7 @@ jobs:
             echo "2. Re-check dsh version drift and the auth-bypass patch (see SYNC-UPSTREAM.md §5)"
             echo "3. Build/run the image and smoke-test \`/healthz\`, settings, WebSocket"
           } > "$RUNNER_TEMP/pr-body.md"
-          gh pr create --base main --head "$branch" \
+          gh pr create --base dev --head "$branch" \
             --title "chore: sync upstream dev@$short" \
             --body-file "$RUNNER_TEMP/pr-body.md"
 
@@ -153,7 +153,7 @@ jobs:
             echo
             echo "Resolve locally, then push the result:"
             echo '```bash'
-            echo "cd runtime && git fetch upstream dev && git switch main"
+            echo "cd runtime && git fetch upstream dev && git switch dev"
             echo "git merge upstream/dev     # resolve conflicts"
             echo "deepseek-harness/deploy/scripts/sync-upstream.sh --push   # or just commit + push"
             echo '```'

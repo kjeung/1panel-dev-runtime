@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sync the plain-HTTP fork (this repository) with upstream 1Panel-dev/runtime.
 #
-#   upstream/dev ──rebase──▶ main
+#   upstream/dev ──rebase──▶ dev
 #                              ├── deepseek-harness/          (image source)
 #                              └── deepseek-harness/deploy/   (compose, docs, exported diff)
 #
@@ -50,12 +50,12 @@ UPSTREAM_SHA="$(git rev-parse upstream/dev)"
 BASE_SHORT="$(git rev-parse --short "$UPSTREAM_SHA")"
 echo "upstream/dev = $UPSTREAM_SHA"
 
-[[ "$(git rev-parse --abbrev-ref HEAD)" == "main" ]] || git switch main
+[[ "$(git rev-parse --abbrev-ref HEAD)" == "dev" ]] || git switch dev
 
 if git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
-  say "main 已包含 upstream/dev，无需 rebase"
+  say "dev 已包含 upstream/dev，无需 rebase"
 else
-  say "rebase main 到 upstream/dev"
+  say "rebase dev 到 upstream/dev"
   if ! git rebase "$UPSTREAM_SHA"; then
     cat >&2 <<'EOF'
 
@@ -128,18 +128,18 @@ mkdir -p "$PATCHES"
 rm -f "$PATCHES"/*.diff "$PATCHES"/*.patch "$PATCHES"/*.bundle
 git diff "upstream/dev..HEAD" -- deepseek-harness .dockerignore \
   ':(exclude)deepseek-harness/deploy' > "$PATCHES/image-source.diff"
-git bundle create "$PATCHES/main.bundle" "upstream/dev..HEAD" >/dev/null
+git bundle create "$PATCHES/dev.bundle" "upstream/dev..HEAD" >/dev/null
 printf '%s\n' "$UPSTREAM_SHA" > "$PATCHES/BASE"
 printf 'baseline -> %s（%s）\n' "$PATCHES/BASE" "$UPSTREAM_SHA"
 ls -1 "$PATCHES"
 
 if ((PUSH)); then
-  say "推送到 origin/main"
-  git push --force-with-lease origin main
+  say "推送到 origin/dev"
+  git push --force-with-lease origin dev
 fi
 
 say "完成"
 printf 'upstream/dev : %s\n' "$UPSTREAM_SHA"
-printf 'main         : %s\n' "$(git rev-parse --short HEAD)"
+printf 'dev          : %s\n' "$(git rev-parse --short HEAD)"
 printf 'patches/BASE : %s\n' "$(cat "$PATCHES/BASE")"
 printf '\n部署无需额外同步：deploy 目录就在本分支，直接 git pull && cd deepseek-harness/deploy && docker compose build\n'

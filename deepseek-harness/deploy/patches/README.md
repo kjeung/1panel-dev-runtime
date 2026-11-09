@@ -6,7 +6,7 @@
 | 文件 | 说明 |
 |---|---|
 | `image-source.diff` | `git diff upstream/dev..HEAD -- deepseek-harness .dockerignore`，对上游的直接改动 |
-| `main.bundle` | `main` 分支相对 `upstream/dev` 的 thin bundle（离线取完整分支） |
+| `dev.bundle` | `dev` 分支相对 `upstream/dev` 的 thin bundle（离线取完整分支） |
 | `BASE` | 上述两者所基于的上游 `dev` 提交（完整 sha） |
 
 ## 在上游原版上复现
@@ -26,8 +26,8 @@ git clone --branch dev --filter=blob:none --sparse \
   https://github.com/1Panel-dev/runtime.git runtime
 git -C runtime sparse-checkout set deepseek-harness
 git -C runtime checkout "$(cat deepseek-harness/deploy/patches/BASE)"
-git -C runtime fetch "$OLDPWD/deepseek-harness/deploy/patches/main.bundle" main:main
-git -C runtime checkout main
+git -C runtime fetch "$OLDPWD/deepseek-harness/deploy/patches/dev.bundle" dev:dev
+git -C runtime checkout dev
 ```
 
 ## 重新生成

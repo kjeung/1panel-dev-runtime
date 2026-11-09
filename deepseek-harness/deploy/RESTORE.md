@@ -216,8 +216,8 @@ docker compose exec -u node deepseek-harness \
 ## 6. 重建步骤（照抄）
 
 ```bash
-# 1. 取代码（main 分支，含 ADR 0003 的布局还原）
-git clone -b main https://github.com/kjeung/1panel-dev-runtime.git
+# 1. 取代码（dev 分支，含 ADR 0003/0004 的布局）
+git clone -b dev https://github.com/kjeung/1panel-dev-runtime.git
 cd 1panel-dev-runtime/deepseek-harness/deploy
 
 # 2. 重建 .env（值见本文件第 2 节）
