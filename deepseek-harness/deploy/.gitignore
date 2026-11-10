@@ -3,13 +3,14 @@
 .env.local
 .env.*.local
 
-# Compose 本地覆盖文件（Compose 会自动加载 docker-compose.override.yml）
+# Compose 本地覆盖文件（Compose 会自动加载 compose.override.yml；旧名 docker-compose.* 一并忽略，
+# 便于从旧布局升级过来的机器继续工作）
 compose.local.yml
 compose.local.yaml
+compose.override.yml
 docker-compose.local.yml
 docker-compose.local.yaml
 docker-compose.override.yml
-compose.override.yml
 
 # 其它本地覆盖（含 traefik/dynamic.local.yml 等）
 *.local.yml

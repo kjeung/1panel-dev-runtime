@@ -17,7 +17,7 @@
 
 | 项 | 值 | 来源 |
 |---|---|---|
-| 镜像名（本地构建） | `deepseek-harness:plain` | `docker-compose.yml` 的 `image:` 默认 |
+| 镜像名（本地构建） | `deepseek-harness:plain` | `compose.yml` 的 `image:` 默认 |
 | 镜像名（CI 发布） | `kjeung/deepseek-harness-plain` | `.github/workflows/deepseek-harness-release.yml` |
 | `DSH_VERSION` | `0.2.2-rc.1` | Dockerfile `ARG` / compose / workflow 三处一致 |
 | `DSH_MARKET_VERSION` | `1.73.9` | 同上 |

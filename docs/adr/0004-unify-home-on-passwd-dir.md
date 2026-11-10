@@ -45,7 +45,7 @@ OpenSSH 侧的实证：
 2. `docker-entrypoint.sh`：`home_root=/home/node`；`prepare_dsh_volume` 只建家目录、`.dsh`、`.ssh`；`repair_ownership` 增加 `$home_root/.ssh`（并顺带 `.config`）；`CHROME_USER_DATA_DIR` 默认改为 `$home_root/chrome-profile`。
 3. 新增一条**构建期自检断言**：入口脚本的 `--self-test` 读 `getent passwd node`，要求 `home_root` 与之相等，不等即构建失败。这是这条不一致线第一次被测试钉死的地方。
 4. `dsh` 包装脚本的 `HOME` 从 `/data/dsh/home` 改为 `/home/node`；注释说明两个 home 收敛。
-5. `docker-compose.yml`：持久卷挂载点从 `/data/dsh` 改为 `/home/node`（宿主机默认目录从 `./data/dsh` 改为 `./data/home`）。`/data/dsh` 退役，`chrome-profile` 现在是 `$HOME/chrome-profile`。
+5. `compose.yml`：持久卷挂载点从 `/data/dsh` 改为 `/home/node`（宿主机默认目录从 `./data/dsh` 改为 `./data/home`）。`/data/dsh` 退役，`chrome-profile` 现在是 `$HOME/chrome-profile`。
 6. 纵深检查：自检还断言 `$HOME/.ssh` 的 mode 为 `0700`，避免历史上出现过的一类"权限不合规"的 SSH 问
 题（`ssh-keygen` 要求 `.ssh` 目录在 home 之外不能被别人读写）。
 

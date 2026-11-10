@@ -52,8 +52,12 @@ services:
     # 镜像里的 chromium-docker 在没有足够 /dev/shm 时会退回磁盘共享内存，这里仍建议保留 1 GiB。
     shm_size: "1gb"
 
-    # 不要设置 user:，入口脚本需要 root 修正 /data、/workspace 属主，
+    # 不要设置 user:，入口脚本需要 root 修正 home 与 /workspace 属主，
     # 随后以 node(1000) 身份降权运行 dsh 与反代。
+    #
+    # 这里不设 HOME、也不设 DSH_HOME：镜像已 ENV HOME=/home/node（node 用户的
+    # passwd home），DSH 由它派生 $HOME/.dsh。二者都必须留给镜像，compose 若覆盖
+    # HOME，ssh 系工具（按 getpwuid() 解析 ~）与 DSH 就会分家（ADR 0004）。
     environment:
       # 必填：浏览器实际访问的主机名/IPv4（不带协议和端口）。
       # 它同时是 dsh 的 --trusted-host（/api 的 Host 白名单）与反代的 Host 白名单。

@@ -78,7 +78,7 @@ DOCKERFILE_DSH="$(printf '%s\n' "$DOCKERFILE_DSH_VALUES" | head -1)"
 if [[ "$(printf '%s\n' "$DOCKERFILE_DSH_VALUES" | grep -c '^[0-9]')" -gt 1 ]]; then
   printf '⚠ Dockerfile 有多处 "ARG DSH_VERSION=" 默认值；应只保留第一个（全局）默认值，各阶段用不带值的 ARG 继承\n'
 fi
-COMPOSE_DSH="$(sed -n 's/.*DSH_VERSION:-\{0,1\}\([0-9][^} ]*\).*/\1/p' "$ROOT/deepseek-harness/deploy/docker-compose.yml" | head -1)"
+COMPOSE_DSH="$(sed -n 's/.*DSH_VERSION:-\{0,1\}\([0-9][^} ]*\).*/\1/p' "$ROOT/deepseek-harness/deploy/compose.yml" | head -1)"
 if [[ -n "$WORKFLOW_DSH" && -n "$DOCKERFILE_DSH" && "$WORKFLOW_DSH" != "$DOCKERFILE_DSH" ]]; then
   printf '\n⚠ dsh 版本不一致：workflow 默认=%s，Dockerfile ARG=%s\n' "$WORKFLOW_DSH" "$DOCKERFILE_DSH"
 fi
@@ -92,7 +92,7 @@ DOCKERFILE_MARKET="$(printf '%s\n' "$DOCKERFILE_MARKET_VALUES" | head -1)"
 if [[ "$(printf '%s\n' "$DOCKERFILE_MARKET_VALUES" | grep -c '^[0-9]')" -gt 1 ]]; then
   printf '⚠ Dockerfile 有多处 "ARG DSH_MARKET_VERSION=" 默认值；应只保留第一个（全局）默认值\n'
 fi
-COMPOSE_MARKET="$(sed -n 's/.*DSH_MARKET_VERSION:-\{0,1\}\([0-9][^} ]*\).*/\1/p' "$ROOT/deepseek-harness/deploy/docker-compose.yml" | head -1)"
+COMPOSE_MARKET="$(sed -n 's/.*DSH_MARKET_VERSION:-\{0,1\}\([0-9][^} ]*\).*/\1/p' "$ROOT/deepseek-harness/deploy/compose.yml" | head -1)"
 WORKFLOW_MARKET="$(awk '/dshMarketVersion:/{found=1;next} found && /default:/{gsub(/.*default: "|".*/,""); print; exit}' "$WF")"
 if [[ -n "$DOCKERFILE_MARKET" && -n "$COMPOSE_MARKET" && "$DOCKERFILE_MARKET" != "$COMPOSE_MARKET" ]]; then
   printf '⚠ dshmarket 版本不一致：Dockerfile ARG=%s，compose 默认=%s\n' "$DOCKERFILE_MARKET" "$COMPOSE_MARKET"

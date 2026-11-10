@@ -72,28 +72,28 @@ docker compose logs -f
 - 想在上游原版上复现改造：`patches/image-source.diff` 是相对上游的镜像源码改动
   （基线见 `patches/BASE`），用法见 [patches/README.md](patches/README.md)。
 - 本地覆盖文件已在 `.gitignore` 里忽略：`.env`、`*.local.yml`、`compose.local.yml`、
-  `docker-compose.local.yml`、`docker-compose.override.yml`、`data/`、`workspace/`、`.run/`。
+  `compose.override.yml`、`data/`、`workspace/`、`.run/`。
 
-### 本机定制放哪：`docker-compose.local.yml`
+### 本机定制放哪：`compose.local.yml`
 
-入库的 `docker-compose.yml` / `docker-compose.traefik.yml` 只放通用配置。**本机差异**（容器名、网络、端口、
-数据目录、资源限制、基础文件没有转发的环境变量）放到 `docker-compose.local.yml`——它已在 `.gitignore` 里，
+入库的 `compose.yml` / `compose.traefik.yml` 只放通用配置。**本机差异**（容器名、网络、端口、
+数据目录、资源限制、基础文件没有转发的环境变量）放到 `compose.local.yml`——它已在 `.gitignore` 里，
 `git pull` 不会再和你本机的改动冲突（也就不会再有 stash/pop 冲突）。
 
 ```bash
-cp docker-compose.local.yml.example docker-compose.local.yml
-vi docker-compose.local.yml          # 只取消你要改的项
-docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
-               -f docker-compose.local.yml up -d --build
+cp compose.local.yml.example compose.local.yml
+vi compose.local.yml          # 只取消你要改的项
+docker compose -f compose.yml -f compose.traefik.yml \
+               -f compose.local.yml up -d --build
 ```
 
-> 一旦用了 `-f`，Compose **不会**再自动加载 `docker-compose.override.yml`：必须像上面这样把每个文件
-> 都显式列出，并把 `docker-compose.local.yml` 放在最后，覆盖才会生效。
+> 一旦用了 `-f`，Compose **不会**再自动加载 `compose.override.yml`：必须像上面这样把每个文件
+> 都显式列出，并把 `compose.local.yml` 放在最后，覆盖才会生效。
 >
-> 如果已经卡在冲突里：`git checkout HEAD -- docker-compose.yml` 取回入库版本，再把你的本机差异搬进
-> `docker-compose.local.yml`，最后 `git add` 并 `git stash drop`（stash 在 pop 冲突后仍会保留）。
+> 如果已经卡在冲突里：`git checkout HEAD -- compose.yml` 取回入库版本，再把你的本机差异搬进
+> `compose.local.yml`，最后 `git add` 并 `git stash drop`（stash 在 pop 冲突后仍会保留）。
 
-**为什么 `docker-compose.local.yml` 只写差异、不抄两个入库文件的全文？** 因为 `-f` 是层层叠加，
+**为什么 `compose.local.yml` 只写差异、不抄两个入库文件的全文？** 因为 `-f` 是层层叠加，
 入库文件仍然参与合并：
 
 | 字段类型 | 合并规则 |
@@ -110,8 +110,8 @@ docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
 若确实需要"单文件自包含"（例如平台只接受一个 compose 文件），不要手工维护副本，生成快照：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.traefik.yml \
-               -f docker-compose.local.yml config > merged.yml
+docker compose -f compose.yml -f compose.traefik.yml \
+               -f compose.local.yml config > merged.yml
 ```
 
 `config` 会做变量插值（快照里含有真实密钥，别提交/外传），也不随 `git pull` 更新——上游改了
@@ -121,7 +121,7 @@ compose 就得重新生成，这正是默认使用差异文件的原因。
 之后在 `deploy/` 下直接 `docker compose up -d`：
 
 ```bash
-COMPOSE_FILE=docker-compose.yml:docker-compose.traefik.yml:docker-compose.local.yml
+COMPOSE_FILE=compose.yml:compose.traefik.yml:compose.local.yml
 ```
 
 > Linux/macOS 用 `:` 分隔；Windows 用 `;`（或自定义 `COMPOSE_PATH_SEPARATOR`）。
@@ -170,16 +170,16 @@ location / {
 
 | 拓扑 | 做法 | 动态配置里的 service URL |
 |---|---|---|
-| **A. Traefik 也是容器（推荐）** | 用 `docker-compose.traefik.yml` 叠加启动，8080 不再发布到宿主机，app 加入 `traefik` 网络 | `http://deepseek-harness:8080` |
+| **A. Traefik 也是容器（推荐）** | 用 `compose.traefik.yml` 叠加启动，8080 不再发布到宿主机，app 加入 `traefik` 网络 | `http://deepseek-harness:8080` |
 | B. Traefik 用 host 网络/直连宿主机回环 | 保持默认 compose（只发布 `127.0.0.1:8080`） | `http://127.0.0.1:8080` |
 
 > 拓扑 A 需要 **Compose ≥ 2.24**（用到 `!reset` 清除基础文件的 `ports:`）。
-> 旧版本直接编辑 `docker-compose.yml`：删掉 `ports:` 段，改成 `expose: ["8080"]` 并加入 `traefik` 网络。
+> 旧版本直接编辑 `compose.yml`：删掉 `ports:` 段，改成 `expose: ["8080"]` 并加入 `traefik` 网络。
 
 ```bash
 # 拓扑 A
 docker network create traefik 2>/dev/null || true
-docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d --build
+docker compose -f compose.yml -f compose.traefik.yml up -d --build
 ```
 
 把 `traefik/dynamic.yml` 挂进 Traefik（或用你自己的 file provider 目录）：
@@ -526,7 +526,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
   DSH 的 WebSocket 路径、`/api` 栅栏、gzip、300 MiB 上限也可能变化。完整清单见
   [SYNC-UPSTREAM.md §5](SYNC-UPSTREAM.md#5-dsh-版本升级最需要注意的一步)，要点：
   1. 同步上游并重新应用/修正 `patch-dsh-authenticated-settings.mjs` 与 `patch-dsh-manifest-sse.mjs` 的匹配字符串；
-  2. 三处版本号保持一致：`docker-compose.yml` 的 `DSH_VERSION`、`.env.example`、`.github/workflows/deepseek-harness-release.yml` 默认值；
+  2. 三处版本号保持一致：`compose.yml` 的 `DSH_VERSION`、`.env.example`、`.github/workflows/deepseek-harness-release.yml` 默认值；
      社区插件市场版本 `DSH_MARKET_VERSION` 独立升级，但 DSH 换 minor 时要复核 dshmarket 的 peer 范围并同步调整；
   3. 构建后跑端到端（`/healthz`、settings、WebSocket、SSE），再发布。
 
@@ -801,9 +801,9 @@ docker compose exec -T deepseek-harness sh -c \
 
 | 文件 | 用途 |
 |---|---|
-| `docker-compose.yml` | 单容器编排（构建/镜像二选一、健康检查、日志轮转、优雅退出） |
+| `compose.yml` | 单容器编排（构建/镜像二选一、健康检查、日志轮转、优雅退出） |
 | `.env.example` | 全部环境变量示例与注释 |
-| `docker-compose.local.yml.example` | 本机覆盖模板（容器名、外部网络、端口、数据目录、资源、未转发的变量）；复制为 `docker-compose.local.yml` 使用，该文件不入库 |
+| `compose.local.yml.example` | 本机覆盖模板（容器名、外部网络、端口、数据目录、资源、未转发的变量）；复制为 `compose.local.yml` 使用，该文件不入库 |
 | `../` | 改造后的镜像源码（Dockerfile、entrypoint、node-proxy.mjs、构建期测试） |
 | `patches/` | 相对上游的镜像源码 diff + bundle（基线见 `patches/BASE`）+ 复现说明 |
 | `scripts/sync-upstream.sh` | 一键同步上游：rebase → 测试 → 重新导出 patches → 推送 |

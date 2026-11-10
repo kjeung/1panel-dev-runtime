@@ -104,7 +104,7 @@ jobs:
           dockerfile_dsh="$(sed -n 's/^ARG DSH_VERSION=//p' deepseek-harness/Dockerfile | head -1)"
           echo "release workflow dsh=${workflow_dsh:-unknown} Dockerfile ARG=${dockerfile_dsh:-unknown}"
           if [ -n "$dockerfile_dsh" ] && [ "$workflow_dsh" != "$dockerfile_dsh" ]; then
-            echo "::warning::dsh version drift: workflow=$workflow_dsh Dockerfile=$dockerfile_dsh — align them and deploy/docker-compose.yml + deploy/.env, see deepseek-harness/deploy/SYNC-UPSTREAM.md §5"
+            echo "::warning::dsh version drift: workflow=$workflow_dsh Dockerfile=$dockerfile_dsh — align them and deploy/compose.yml + deploy/.env, see deepseek-harness/deploy/SYNC-UPSTREAM.md §5"
           fi
 
       - name: Push review branch and open PR

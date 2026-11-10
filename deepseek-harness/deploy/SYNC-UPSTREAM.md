@@ -97,7 +97,7 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
    需要在 `deepseek-harness/` 里更新对应匹配字符串。
 2. **行为可能变化**：DSH 的 WebSocket 路径、`/api` 栅栏、gzip、300 MiB 上限都依赖 DSH 实现，
    升级后必须重跑端到端（见下）再发布。
-3. 更新默认版本：`deepseek-harness/deploy/docker-compose.yml` 的 `DSH_VERSION`、`deploy/.env.example`、
+3. 更新默认版本：`deepseek-harness/deploy/compose.yml` 的 `DSH_VERSION`、`deploy/.env.example`、
    `.github/workflows/deepseek-harness-release.yml` 的 `dshVersion` 默认值，保持三者一致。
 3.5 **桌面集成也要复核**（与 dsh 版本绑定）：
    - `deepseek-harness/plugins/dsh-browser-desktop/index.js` 依赖 `ctx.webServer.register({kind:'prefix'})` 与
@@ -118,7 +118,7 @@ deepseek-harness/deploy/scripts/sync-upstream.sh --skip-tests
      （semver 预发布规则：不同 patch 的预发布版本不会落入 `^0.2.1-rc.1`），要同步升 `DSH_MARKET_VERSION`
      并确认它声明的 dsh 版本下限；
    - 三个默认值保持一致：`deepseek-harness/Dockerfile` 的 `ARG DSH_MARKET_VERSION`、
-     `deploy/docker-compose.yml` 的 `DSH_MARKET_VERSION`、`.github/workflows/deepseek-harness-release.yml`
+     `deploy/compose.yml` 的 `DSH_MARKET_VERSION`、`.github/workflows/deepseek-harness-release.yml`
      的 `dshMarketVersion` 输入（`deploy/scripts/sync-upstream.sh` 会检查前两者）；
    - 构建期会跑 `node --test /tmp/test-dsh-market.mjs`（包身份/bundle 声明/Web 客户端/overlay
      绝对路径与镜像文件存在性）和两个 overlay 的 `--dump-config` 组合，并用 DSH 的
