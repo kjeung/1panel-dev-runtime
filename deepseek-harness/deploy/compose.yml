@@ -104,6 +104,11 @@ services:
       # `.gitconfig`、`.ssh/`（SSH 密钥与 known_hosts）以及 `chrome-profile/`。
       # 挂载点就是 /etc/passwd 给 node 记的 home，所以 $HOME 与 getpwuid() 一致，
       # ssh 系工具与 DSH 都落在同一处（ADR 0004）。
+      #
+      # 从旧布局（挂 /data/dsh）升级过来的机器：旧卷里 DSH 数据在 `home/.dsh` 那一层，
+      # 新布局要求 `DSH_DATA_DIR` 直接指向**当时那个 home**（即旧卷里的 `home/`）。
+      # 若继续把 `DSH_DATA_DIR` 写成旧的 `./data/dsh`，容器会挂到旧卷根，`.dsh` 找不到，
+      # 表现等同全新部署（ADR 0004 不提供自动迁移）。
       - ${DSH_DATA_DIR:-./data/home}:/home/node
       # Agent 工作目录（沙箱 workspaceRoot）
       - ${WORKSPACE_DIR:-./workspace}:/workspace
