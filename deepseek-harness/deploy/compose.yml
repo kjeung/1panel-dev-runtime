@@ -17,10 +17,15 @@
 # 插件市场：镜像内置社区插件市场 dshmarket，入口在 DSH 的「插件」页；
 # DSH_MARKET_ENABLED=0 只关闭入口，市场装的社区插件仍在 /home/node 卷里。
 #
+# 容器名默认 dsh（DSH_CONTAINER_NAME 可覆盖），所以 `docker compose exec dsh …`、
+# `docker logs dsh` 都是这个名字；两个挂载点都是宿主机目录绑定，不是命名卷。
+#
 # 用法：
 #   cp .env.example .env        # 只需填 DSH_ACCESS_HOST
 #   docker compose up -d --build
 #   docker compose logs -f      # 出现 "available at http://<host>:8080" 即就绪
+#
+# 拓扑 A（Traefik 也是容器）额外加载 compose.traefik.yml，网络名默认 traefik_net。
 
 name: deepseek-harness
 
@@ -39,7 +44,11 @@ services:
         DSH_VERSION: ${DSH_VERSION:-0.2.2-rc.1}
         # 社区插件市场版本，独立于 DSH 版本升级（DSH 换 minor 时要同步复核 peer 范围）
         DSH_MARKET_VERSION: ${DSH_MARKET_VERSION:-1.73.9}
-    container_name: deepseek-harness
+    # 容器名默认 dsh，可用 DSH_CONTAINER_NAME 覆盖。同时它会成为 docker 网络上的
+    # DNS 别名，所以 `http://dsh:8080` 与 `http://deepseek-harness:8080` 都能回源。
+    # 注意：不要改上面的 service 名（`deepseek-harness`）——Traefik 与 compose 的
+    # 服务级引用都按它来。
+    container_name: ${DSH_CONTAINER_NAME:-dsh}
     restart: unless-stopped
 
     # 桌面容器里跑着一个会渲染任意网页的浏览器：禁止任何进程通过 setuid 提权。
@@ -98,6 +107,10 @@ services:
       # 若外部反代在另一个容器，请删掉这行、改用共享 docker 网络并只 expose。
       - "127.0.0.1:${DSH_HTTP_PORT:-8080}:8080"
 
+    # 两个挂载点都是**宿主机目录绑定**（bind mount），不用命名卷/目录卷：
+    # 数据在宿主机上直接可见，备份就是打包这两个目录，迁移就是拷目录。
+    # 因此 DSH_DATA_DIR / WORKSPACE_DIR 必须是宿主机路径（相对路径按本文件所在的
+    # deploy/ 解析），不要写成卷名。
     volumes:
       # 用户态根：整个 node 用户的 home —— `.dsh/`（profiles、settings.yaml、
       # .credentials.yaml、会话、日志）、`.cache`、`.config`（gh 登录态）、

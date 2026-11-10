@@ -3,8 +3,8 @@
 # 前提：
 #   1) 本文件挂载到 Traefik 容器的 /etc/traefik/dynamic（static config 里
 #      providers.file.directory 指向它，watch: true 可热更新）；
-#   2) deepseek-harness 容器与 Traefik 在同一个 docker 网络（默认网络名 traefik），
-#      容器内监听 0.0.0.0:8080；
+#   2) deepseek-harness 容器与 Traefik 在同一个 docker 网络（默认网络名 traefik_net，
+#      由 compose.traefik.yml 的 DSH_TRAEFIK_NETWORK 决定），容器内监听 0.0.0.0:8080；
 #   3) 已存在认证中间件（下面 dsh-auth 只是占位示例，换成你自己的）。
 
 # 内嵌的 Chromium 桌面（/desktop/ 静态资源 + /desktop/websockify 的 RFB WebSocket）
@@ -30,7 +30,9 @@ http:
         passHostHeader: true
         serversTransport: dsh-transport
         servers:
-          - url: "http://deepseek-harness:8080"
+          # 默认 container_name 是 dsh，它在 docker 网络内也是 DNS 别名；
+          # service 名 `deepseek-harness` 等价可用。改了 DSH_CONTAINER_NAME 就改这里。
+          - url: "http://dsh:8080"
         # 可选健康检查：/healthz 只接受回环来源或带共享密钥的请求，
         # 所以必须带 X-DSH-Proxy-Secret（否则 Traefik 会判 403 → 后端被摘除）。
         # 没设 PROXY_SHARED_SECRET 时请不要启用 healthCheck，交给容器自带 healthcheck。

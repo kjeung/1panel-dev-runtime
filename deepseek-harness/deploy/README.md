@@ -71,57 +71,48 @@ docker compose logs -f
 - 只想用已构建镜像：设置 `DSH_IMAGE=…`，并删掉 compose 里的 `build:` 与 `pull_policy:` 段。
 - 想在上游原版上复现改造：`patches/image-source.diff` 是相对上游的镜像源码改动
   （基线见 `patches/BASE`），用法见 [patches/README.md](patches/README.md)。
-- 本地覆盖文件已在 `.gitignore` 里忽略：`.env`、`*.local.yml`、`compose.local.yml`、
-  `compose.override.yml`、`data/`、`workspace/`、`.run/`。
+- 本机私有文件已在 `.gitignore` 里忽略：`.env`、`*.local.yml`、`compose.override.yml`、
+  `data/`、`workspace/`、`.run/`。
 
-### 本机定制放哪：`compose.local.yml`
+### 本机定制放哪
 
-入库的 `compose.yml` / `compose.traefik.yml` 只放通用配置。**本机差异**（容器名、网络、端口、
-数据目录、资源限制、基础文件没有转发的环境变量）放到 `compose.local.yml`——它已在 `.gitignore` 里，
-`git pull` 不会再和你本机的改动冲突（也就不会再有 stash/pop 冲突）。
+入库的只有 `compose.yml`（单容器基线）和 `compose.traefik.yml`（拓扑 A 的叠加层）。
+**不再提供本地覆盖文件模板** —— 容器名、网络名、端口、数据目录都做成了变量，改 `.env` 即可，
+不需要多一个 compose 文件参与合并，也就避开了 `-f` 叠加那一整套坑（合并规则、`!reset`、
+`COMPOSE_FILE`、单文件快照）。
+
+常用变量（全部见 [`.env.example`](.env.example)）：
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `DSH_CONTAINER_NAME` | `dsh` | 容器名；同时是 docker 网络内的 DNS 别名 |
+| `DSH_TRAEFIK_NETWORK` | `traefik_net` | 拓扑 A 接入的外部网络名，必须与 Traefik 容器实际所在网络同名 |
+| `DSH_HTTP_PORT` | `8080` | 宿主机回环端口（容器内固定 8080） |
+| `DSH_DATA_DIR` | `./data/home` | 宿主机目录，绑到 `/home/node`（整个 node 用户 home） |
+| `WORKSPACE_DIR` | `./workspace` | 宿主机目录，绑到 `/workspace` |
+| `DSH_IMAGE` | `deepseek-harness:plain` | 用已构建镜像时改这里（配合删掉 `build:` 段） |
+
+两个挂载点都是**宿主机目录绑定**，不是命名卷：数据在宿主机上直接可见，备份就是打包这两个目录。
+所以 `DSH_DATA_DIR` / `WORKSPACE_DIR` 必须写宿主机路径（相对路径按本文件所在的 `deploy/` 解析），
+不要写成卷名。
+
+确实需要额外叠配置时，Compose 本身仍支持 `compose.override.yml`（该文件已忽略，不会入库）：
 
 ```bash
-cp compose.local.yml.example compose.local.yml
-vi compose.local.yml          # 只取消你要改的项
-docker compose -f compose.yml -f compose.traefik.yml \
-               -f compose.local.yml up -d --build
+# deploy/ 下直接生效，无需 -f
+docker compose up -d --build
 ```
 
-> 一旦用了 `-f`，Compose **不会**再自动加载 `compose.override.yml`：必须像上面这样把每个文件
-> 都显式列出，并把 `compose.local.yml` 放在最后，覆盖才会生效。
+> 一旦你显式用了 `-f`，Compose **不再**自动加载 `compose.override.yml`，届时必须把每个文件都列出来。
 >
-> 如果已经卡在冲突里：`git checkout HEAD -- compose.yml` 取回入库版本，再把你的本机差异搬进
-> `compose.local.yml`，最后 `git add` 并 `git stash drop`（stash 在 pop 冲突后仍会保留）。
+> 如果本机改过入库文件、`git pull` 卡在 stash/pop 冲突：`git checkout HEAD -- compose.yml compose.traefik.yml`
+> 取回入库版本，再把差异搬进 `compose.override.yml`，最后 `git add` 并 `git stash drop`（stash 在 pop 冲突后仍会保留）。
 
-**为什么 `compose.local.yml` 只写差异、不抄两个入库文件的全文？** 因为 `-f` 是层层叠加，
-入库文件仍然参与合并：
-
-| 字段类型 | 合并规则 |
-| --- | --- |
-| mapping（`environment`、`logging`、`build.args`…） | 按 key 合并，后者覆盖前者 |
-| sequence（`ports`、`volumes`、`dns`…） | 追加；其中 `ports` 唯一键是 `{ip,target,published,protocol}`、`volumes` 是容器内 `target`，同一键合并/替换而不是重复 |
-| `command` / `entrypoint` / `healthcheck.test` | 整体替换 |
-| 要删除 / 要整体替换 | `!reset`（Compose ≥ 2.24）/ `!override`（≥ 2.24.4） |
-
-所以"换宿主机端口"不能直接写 `ports:`（会变成 8080、8081 同时发布），要用
-`ports: !override`；"不发布端口"用 `ports: !reset []`——模板里已经按这个写法注释好。
-用 `docker compose … config` 可以随时查看合并后的最终模型。
-
-若确实需要"单文件自包含"（例如平台只接受一个 compose 文件），不要手工维护副本，生成快照：
-
-```bash
-docker compose -f compose.yml -f compose.traefik.yml \
-               -f compose.local.yml config > merged.yml
-```
-
-`config` 会做变量插值（快照里含有真实密钥，别提交/外传），也不随 `git pull` 更新——上游改了
-compose 就得重新生成，这正是默认使用差异文件的原因。
-
-不想每次敲三个 `-f`：可以把文件列表写进 `.env`（Compose 支持从 `.env` 读取这些预定义变量），
+**拓扑 A 不必每次敲 `-f`**：把文件列表写进 `.env`（Compose 会从 `.env` 读这些预定义变量），
 之后在 `deploy/` 下直接 `docker compose up -d`：
 
 ```bash
-COMPOSE_FILE=compose.yml:compose.traefik.yml:compose.local.yml
+COMPOSE_FILE=compose.yml:compose.traefik.yml
 ```
 
 > Linux/macOS 用 `:` 分隔；Windows 用 `;`（或自定义 `COMPOSE_PATH_SEPARATOR`）。
@@ -141,7 +132,7 @@ This container performs no TLS and no authentication: restrict port 8080 to the 
 ```bash
 curl -fsS -o /dev/null -w '%{http_code}\n' \
   -H 'Host: dsh.example.com' http://127.0.0.1:8080/     # 期望 200
-docker compose exec -T deepseek-harness \
+docker compose exec -T dsh \
   curl -fsS http://127.0.0.1:8080/healthz               # {"ok":true,"backend":200}
 ```
 
@@ -170,15 +161,16 @@ location / {
 
 | 拓扑 | 做法 | 动态配置里的 service URL |
 |---|---|---|
-| **A. Traefik 也是容器（推荐）** | 用 `compose.traefik.yml` 叠加启动，8080 不再发布到宿主机，app 加入 `traefik` 网络 | `http://deepseek-harness:8080` |
+| **A. Traefik 也是容器（推荐）** | 用 `compose.traefik.yml` 叠加启动，8080 不再发布到宿主机，app 加入 `traefik_net` 网络 | `http://dsh:8080`（`dsh` 是默认容器名，网络内 DNS 别名） |
 | B. Traefik 用 host 网络/直连宿主机回环 | 保持默认 compose（只发布 `127.0.0.1:8080`） | `http://127.0.0.1:8080` |
 
 > 拓扑 A 需要 **Compose ≥ 2.24**（用到 `!reset` 清除基础文件的 `ports:`）。
-> 旧版本直接编辑 `compose.yml`：删掉 `ports:` 段，改成 `expose: ["8080"]` 并加入 `traefik` 网络。
+> 网络名默认 `traefik_net`，用 `DSH_TRAEFIK_NETWORK` 可覆盖；它必须与 Traefik 容器实际所在网络同名。
+> 旧版本直接编辑 `compose.yml`：删掉 `ports:` 段，改成 `expose: ["8080"]` 并加入该网络。
 
 ```bash
-# 拓扑 A
-docker network create traefik 2>/dev/null || true
+# 拓扑 A（网络名默认 traefik_net；Traefik 已在别的网络上就设 DSH_TRAEFIK_NETWORK）
+docker network create traefik_net 2>/dev/null || true
 docker compose -f compose.yml -f compose.traefik.yml up -d --build
 ```
 
@@ -240,7 +232,7 @@ Traefik 排障要点：
 | 现象 | 原因 |
 |---|---|
 | 404 | Router 未匹配：`Host` 规则与访问域名不一致、entryPoint 不对，或动态配置未加载（看 Traefik dashboard/日志） |
-| 502 | Service URL 错或网络不通：拓扑 A 的 app 不在 `traefik` 网络，或拓扑 B 未发布 `127.0.0.1:8080` |
+| 502 | Service URL 错或网络不通：拓扑 A 的 app 不在 `traefik_net` 网络，或拓扑 B 未发布 `127.0.0.1:8080` |
 | 403 `forbidden` | `passHostHeader: false`，或反代改写了 Host/端口 |
 | 401/302 登录页反复出现 | 认证中间件没覆盖 WebSocket 路径，或会话 Cookie 没透传 |
 | 流式卡住/一次性出现 | 加了 `buffering`/`compress` 中间件，或超时过小 |
@@ -332,12 +324,12 @@ Traefik 排障要点：
 
 ```bash
 # token 从标准输入读入，不留在 shell history；建议用最小权限的 fine-grained PAT
-docker compose exec -T -u node deepseek-harness \
+docker compose exec -T -u node dsh \
   gh auth login --hostname github.com --git-protocol https --with-token < github-token.txt
 
 # 让 git 的 HTTPS 凭据也走 gh（写入 /home/node/.gitconfig）
-docker compose exec -u node deepseek-harness gh auth setup-git
-docker compose exec -u node deepseek-harness gh auth status
+docker compose exec -u node dsh gh auth setup-git
+docker compose exec -u node dsh gh auth status
 ```
 
 `gh auth login --web` 也可以用：它走**设备码流程**（终端显示一次性代码，在浏览器打开 GitHub 页面输入），
@@ -444,7 +436,7 @@ API Key 是这条链路上受支持的等价入口。
    复制完整 URL（或在 DevTools Network 里看 302 的 `Location`），在容器内执行：
 
    ```bash
-   docker compose exec -T deepseek-harness \
+   docker compose exec -T dsh \
      curl -i 'http://127.0.0.1:3080/oauth/callback?code=...&state=...'
    ```
 
@@ -501,10 +493,10 @@ chown，会启动失败。
 ```bash
 docker compose ps                 # (healthy) 才算就绪
 docker compose logs -f            # 入口脚本 + dsh + 转发进程（JSON 访问日志）
-docker compose exec deepseek-harness dsh --version
+docker compose exec dsh dsh --version
 
 # 容器内健康检查（等价于 compose healthcheck；/healthz 只接受回环来源）
-docker compose exec -T deepseek-harness \
+docker compose exec -T dsh \
   curl -fsS http://127.0.0.1:8080/healthz        # {"ok":true,"backend":200}
 
 # 宿主机冒烟：经发布端口访问（Host 必须是 DSH_ACCESS_HOST）
@@ -542,7 +534,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 | `499` 且约每 120–125 s 一次（`/plugins/events`） | 外部反代把空闲 SSE 当读超时切断。把该站点的 `proxy_read_timeout` 提到 3600s、`proxy_buffering off`；若前面还有 Cloudflare/LB，需允许 SSE 并依赖应用心跳。 |
 | UI 能打开但永远不刷新、任务无输出 | 外部反代没有转发 WebSocket 升级（缺 `Upgrade`/`Connection` 头）。 |
 | 桌面面板空白或一直“正在连接” | 三种原因：① 反代没转发 `/desktop/websockify` 的 WebSocket 升级；② 反代加了 `buffering`/`compress`；③ 容器内 x11vnc 没起（`docker compose logs` 里有 `desktop-supervisor` 记录，细节在 `/tmp/dsh-desktop/*.log`）。 |
-| `/desktop/vnc.html` 返回 404 | `DSH_DESKTOP_ENABLED=0`，或运行的是不含桌面的旧镜像；确认 `docker compose exec -T deepseek-harness curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/desktop/vnc.html`。 |
+| `/desktop/vnc.html` 返回 404 | `DSH_DESKTOP_ENABLED=0`，或运行的是不含桌面的旧镜像；确认 `docker compose exec -T dsh curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/desktop/vnc.html`。 |
 | 面板刚打开就断开，日志反复 `chromium exited; restarting` | `/dev/shm` 太小导致渲染进程崩溃；compose 已设 `shm_size: 1gb`，自定义部署请保留。也可能是 `CHROME_USER_DATA_DIR` 不可写（NFS/权限）。 |
 | 桌面里中文显示成方块 | 镜像缺 `fonts-noto-cjk`：确认用的是本仓库构建的镜像，而不是上游其它镜像。 |
 | 面板 `403 forbidden` | 与其他路径一样：反代改写了 Host（白名单不匹配），或开了 `PROXY_SHARED_SECRET` 但反代没带 `X-DSH-Proxy-Secret`。 |
@@ -554,9 +546,9 @@ curl -fsS -o /dev/null -w '%{http_code}\n' \
 | 偶发 502（空闲后首次请求） | 先排除客户端取消（见上表 502 行：`ms` 与取消时刻吻合、`bytes=0`、无 stderr）。若确属空闲复用，多层 keep-alive 都可能：外部反代↔容器，或容器内转发进程↔dsh。转发进程已把上游连接池空闲超时设成 4 s（低于 dsh 的 ~5 s）以避免复用被后端关掉的连接；若仍出现，先看访问日志的 `status`/`ms` 定位是哪一跳。 |
 | 端口被占用 | 改 `DSH_HTTP_PORT`。 |
 | 数据目录在 NFS/SMB 上启动失败 | 入口脚本要 chown/改权限，此类文件系统不支持；改用本地盘或 named volume。 |
-| 插件页没有「插件市场」入口 | `DSH_MARKET_ENABLED=0`，或运行的是不含 dshmarket 的旧镜像；确认 `docker compose exec -T deepseek-harness curl -fsS http://127.0.0.1:3080/dsh-market/status` 有 JSON（`"restart":false`）。 |
+| 插件页没有「插件市场」入口 | `DSH_MARKET_ENABLED=0`，或运行的是不含 dshmarket 的旧镜像；确认 `docker compose exec -T dsh curl -fsS http://127.0.0.1:3080/dsh-market/status` 有 JSON（`"restart":false`）。 |
 | `/dsh-market/status` 404 | 市场行没挂载（同上）；或该请求打到了外部反代的其它站点。 |
-| 市场里装社区插件报 `EACCES` / `permission denied` | 数据卷里残留 root 属主的 profile 文件（旧镜像或 root 身份跑过 `npm/pnpm`）。重建到含属主修复的镜像后重启即可；临时处理：`docker compose exec -u root deepseek-harness chown -R -h node:node /home/node/.dsh/profiles`。 |
+| 市场里装社区插件报 `EACCES` / `permission denied` | 数据卷里残留 root 属主的 profile 文件（旧镜像或 root 身份跑过 `npm/pnpm`）。重建到含属主修复的镜像后重启即可；临时处理：`docker compose exec -u root dsh chown -R -h node:node /home/node/.dsh/profiles`。 |
 | Agent 报沙箱不可用 | 容器内 bwrap 需要非特权 user namespace；DSH 会回退 landlock，两者都不可用时受限命令失败。仅在自建环境考虑 `seccomp=unconfined`，需自行验证。 |
 
 ## 7. 安全建议（重要）
@@ -646,12 +638,12 @@ Traefik entryPoint、放行端口，而且必然绕开 `node-proxy` 的 Host 白
 容器内冒烟（不经反代，直接问 dsh 本体）：
 
 ```bash
-docker compose exec -T deepseek-harness curl -fsS -o /dev/null -w '%{http_code}\n' \
+docker compose exec -T dsh curl -fsS -o /dev/null -w '%{http_code}\n' \
   http://127.0.0.1:3080/desktop/vnc.html          # 200
 
-docker compose exec -T deepseek-harness curl -fsS http://127.0.0.1:9222/json/version | head -c 120
+docker compose exec -T dsh curl -fsS http://127.0.0.1:9222/json/version | head -c 120
 
-docker compose exec -T deepseek-harness curl -fsS -o /dev/null -w '%{http_code}\n' \
+docker compose exec -T dsh curl -fsS -o /dev/null -w '%{http_code}\n' \
   http://127.0.0.1:3080/desktop/defaults.json     # 200
 ```
 
@@ -763,7 +755,7 @@ Cordis loader 接受路径行，客户端 roster 从该文件最近的 `package.
 （避免同一行 id 出现两次），市场继续走自更新通道。要切回镜像版本：
 
 ```bash
-docker compose exec -T -u node deepseek-harness dsh plugin --profile web remove dshmarket
+docker compose exec -T -u node dsh dsh plugin --profile web remove dshmarket
 docker compose restart
 ```
 
@@ -773,13 +765,13 @@ docker compose restart
 
 ```bash
 # 市场自带的 host 路由；restart 必须是 false（容器生命周期由 entrypoint 管）
-docker compose exec -T deepseek-harness \
+docker compose exec -T dsh \
   curl -fsS http://127.0.0.1:3080/dsh-market/status
 
 # overlay 行确实指向镜像内的绝对路径，且数据卷目录归 node（装社区插件的前提）
-docker compose exec -T deepseek-harness \
+docker compose exec -T dsh \
   sed -n '/id: dsh-market/,/allowRestart/p' /opt/deepseek-harness/web-market.cordis.patch.yml
-docker compose exec -T deepseek-harness sh -c \
+docker compose exec -T dsh sh -c \
   'stat -c "%U:%G %n" /home/node/.dsh/profiles /home/node/chrome-profile /home/node/.ssh 2>/dev/null || true'
 ```
 
@@ -803,7 +795,7 @@ docker compose exec -T deepseek-harness sh -c \
 |---|---|
 | `compose.yml` | 单容器编排（构建/镜像二选一、健康检查、日志轮转、优雅退出） |
 | `.env.example` | 全部环境变量示例与注释 |
-| `compose.local.yml.example` | 本机覆盖模板（容器名、外部网络、端口、数据目录、资源、未转发的变量）；复制为 `compose.local.yml` 使用，该文件不入库 |
+| `compose.traefik.yml` | 拓扑 A 叠加层：不发布宿主机端口、加入 `traefik_net` 网络 |
 | `../` | 改造后的镜像源码（Dockerfile、entrypoint、node-proxy.mjs、构建期测试） |
 | `patches/` | 相对上游的镜像源码 diff + bundle（基线见 `patches/BASE`）+ 复现说明 |
 | `scripts/sync-upstream.sh` | 一键同步上游：rebase → 测试 → 重新导出 patches → 推送 |

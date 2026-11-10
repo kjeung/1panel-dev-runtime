@@ -59,8 +59,8 @@ DSH_ACCESS_HOST=dsh.dh.ci
 `gh` 的具体命令（`HOME` 必须带上，否则会写进容器可写层）：
 
 ```bash
-docker compose exec -u node deepseek-harness gh auth login
-docker compose exec -u node deepseek-harness gh auth setup-git
+docker compose exec -u node dsh gh auth login
+docker compose exec -u node dsh gh auth setup-git
 ```
 
 ## 4. 已配置的模型接口
@@ -122,7 +122,7 @@ ZCODE_ACCOUNT_892C9E4D   GEMINI_ACCOUNT_7D579A96
 重建时一次性装回（8 个，不含 ctrl-enter-send）：
 
 ```bash
-docker compose exec -u node deepseek-harness \
+docker compose exec -u node dsh \
   dsh plugin --profile web add \
     dshmarket@1.73.10 dsh-plugin@2.3.3 dsh-better-sidebar@0.28.2 dsh-cost-meter@1.9.57 \
     dsh-mattpocock-skills-deck@1.9.0-beta.33 \
@@ -203,7 +203,7 @@ dsh-our-free-model
   后者由 §8 第 2 条（不要设 `DSH_HOME`）保证。
 
 ```bash
-docker compose exec -u node deepseek-harness \
+docker compose exec -u node dsh \
   npx -y skills@latest add mattpocock/skills -a cline -g --copy -y
 ```
 
@@ -228,14 +228,14 @@ $EDITOR .env            # 至少填 DSH_ACCESS_HOST=dsh.dh.ci
 docker compose up -d --build
 
 # 4. 确认布局（ADR 0003 的 $HOME/.dsh + ADR 0004 的 HOME=/home/node）
-docker compose exec deepseek-harness ls /home/node/.dsh/profiles
+docker compose exec dsh ls /home/node/.dsh/profiles
 
 # 5. 登录 + 装插件 + 装技能
 #    见第 3、5 节命令；然后从 RESTORE.local.md 抄 API key 填进 Web UI 或 .credentials.yaml
 
 # 6. 恢复模型接口配置
-docker compose cp ./cordis.patch.yml deepseek-harness:/home/node/.dsh/profiles/web/cordis.patch.yml
-docker compose restart deepseek-harness
+docker compose cp ./cordis.patch.yml dsh:/home/node/.dsh/profiles/web/cordis.patch.yml
+docker compose restart dsh
 ```
 
 `cordis.patch.yml` 的完整内容备份见 `RESTORE.local.md` 附录（或旧卷
@@ -251,7 +251,7 @@ docker compose restart deepseek-harness
 | `dsh plugin --profile web list` | **8** 个依赖（不含 ctrl-enter-send） |
 | `dsh --profile web --dump-config` | `exit 0`、stderr 为空；`# == ` 段含 §5.3 列出的 14 个 bundle 名（同一 bundle 的 patch 层会出现多次，故段数多于 14） |
 | `--dump-config` 里 `ctrl-enter-send` | **恰好 1 行**，`name` 是 `file:///opt/deepseek-harness/plugins/dsh-ctrl-enter-send/index.js`（来自镜像 overlay，不是 profile 依赖） |
-| `docker compose exec deepseek-harness dsh --version` | `0.2.2-rc.1` |
+| `docker compose exec dsh dsh --version` | `0.2.2-rc.1` |
 | 模型下拉 | 能看到 `gpt-6-sol`、`monk-*`、`agnes-*`；`trae` 系列**仅当**免费模型插件的账号凭据齐全时才出现 |
 | 默认模型 | 凭据齐全时 `trae / deepseek-v4.1-flash / high`；只恢复插件时 `monk-party / monk-fast`（见 §4 实测差异） |
 
